@@ -1,0 +1,19 @@
+{
+  "name": "threejs-email-scraper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Python data server (server.py) + Next.js frontend for browsing scraped three.js emails.",
+  "scripts": {
+    "setup": "npm install && npm --prefix web install",
+    "dev": "concurrently -k -n server,web -c blue,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "python server.py",
+    "dev:web": "npm --prefix web run dev",
+    "build": "npm --prefix web run build",
+    "start": "concurrently -k -n server,web -c blue,magenta \"npm:start:server\" \"npm:start:web\"",
+    "start:server": "python server.py",
+    "start:web": "npm --prefix web run start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
