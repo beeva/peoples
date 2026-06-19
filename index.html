@@ -99,6 +99,38 @@
   .stat .num { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
   .stat .lbl { font-size: 12.5px; color: var(--text-faint); margin-top: 2px; }
 
+  /* ---------- Toolbar (tabs + rescrape) ---------- */
+  .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 22px; }
+  .toolbar .tabs { margin-bottom: 0; }
+  .rescrape { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .rescrape-btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 9px 15px; border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+    color: var(--text); font-size: 13.5px; font-weight: 600; cursor: pointer; transition: all .16s ease;
+  }
+  .rescrape-btn:hover:not(:disabled) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 20%, var(--surface)); }
+  .rescrape-btn:disabled { opacity: .7; cursor: default; }
+  .rescrape-btn svg { width: 15px; height: 15px; }
+  .stop-btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 9px 14px; border-radius: 999px;
+    border: 1px solid color-mix(in srgb, #f87171 45%, var(--border));
+    background: color-mix(in srgb, #f87171 12%, var(--surface));
+    color: #f87171; font-size: 13.5px; font-weight: 600; cursor: pointer; transition: all .16s ease;
+  }
+  .stop-btn:hover { border-color: #f87171; background: color-mix(in srgb, #f87171 20%, var(--surface)); }
+  .stop-btn svg { width: 12px; height: 12px; }
+  .rescrape-status { font-size: 12.5px; color: var(--text-faint); }
+  .rescrape-status[data-state="running"] { color: var(--accent); }
+  .rescrape-status[data-state="error"] { color: #f87171; }
+  .rescrape-status[data-state="stopped"] { color: #fbbf24; }
+  .rescrape-status[data-state="done"] { color: var(--good); }
+  .spin-mini-inline {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-top-color: var(--accent); animation: spin .8s linear infinite;
+  }
+
   /* ---------- Category tabs ---------- */
   .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 22px; }
   .tab {
@@ -293,7 +325,10 @@
   </header>
 
   <main class="wrap">
-    <div class="tabs" id="tabs" role="tablist" aria-label="Data source"></div>
+    <div class="toolbar">
+      <div class="tabs" id="tabs" role="tablist" aria-label="Data source"></div>
+      <div class="rescrape" id="rescrape" hidden></div>
+    </div>
     <section class="stats" id="stats"></section>
 
     <div class="controls">
@@ -398,6 +433,124 @@
         ? "Contacts scraped from three.js, dev.to & about.me"
         : `Contacts from ${active.label}`;
     }
+  }
+
+  // ---- rescrape ----
+  let scrapePoll = null;
+
+  function relTimeAgo(iso) {
+    if (!iso) return "never";
+    const t = new Date(iso).getTime();
+    if (isNaN(t)) return "never";
+    const secs = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (secs < 60) return "just now";
+    const m = Math.round(secs / 60);
+    if (m < 60) return m + "m ago";
+    const h = Math.round(m / 60);
+    if (h < 24) return h + "h ago";
+    return Math.round(h / 24) + "d ago";
+  }
+
+  function setScrapeStatus(text, st) {
+    const el = $("rescrapeStatus");
+    if (el) { el.textContent = text; el.dataset.state = st || ""; }
+  }
+
+  function setScraping(on) {
+    const btn = $("rescrapeBtn"); if (btn) btn.disabled = on;
+    const stop = $("stopBtn"); if (stop) stop.hidden = !on;
+  }
+
+  function renderRescrape(sources) {
+    const box = $("rescrape");
+    if (!box) return;
+    if (state.source === "all") { box.hidden = true; box.innerHTML = ""; return; }
+    const active = sources.find((s) => s.key === state.source);
+    const label = active ? active.label : state.source;
+    box.hidden = false;
+    box.innerHTML =
+      `<button class="rescrape-btn" id="rescrapeBtn" title="Re-scrape ${esc(label)} (only fetches new content)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+        Rescrape ${esc(label)}</button>
+       <button class="stop-btn" id="stopBtn" title="Stop scraping (keeps what was collected)" hidden>
+        <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+        Stop</button>
+       <span class="rescrape-status" id="rescrapeStatus"></span>`;
+    $("rescrapeBtn").addEventListener("click", triggerScrape);
+    $("stopBtn").addEventListener("click", stopScrape);
+    fetchScrapeStatus().then(applyScrapeStatus);
+  }
+
+  async function fetchScrapeStatus() {
+    try {
+      const res = await fetch("/api/scrape/status?source=" + encodeURIComponent(state.source));
+      return await res.json();
+    } catch { return { status: "idle" }; }
+  }
+
+  function applyScrapeStatus(s) {
+    if (!s) return;
+    if (s.status === "running") {
+      setScraping(true);
+      setScrapeStatus(s.added != null ? `Scraping… +${s.added} new` : "Scraping…", "running");
+      pollScrape();  // guarded against duplicate intervals
+    } else if (s.status === "error") {
+      setScraping(false);
+      setScrapeStatus("Error: " + (s.message || s.error || "failed"), "error");
+    } else if (s.status === "stopped") {
+      setScraping(false);
+      setScrapeStatus("Stopped · +" + (s.added != null ? s.added : 0) + " new", "stopped");
+    } else if (s.status === "done" && s.added != null) {
+      setScraping(false);
+      setScrapeStatus(`+${s.added} new · ${relTimeAgo(s.last_run)}`, "done");
+    } else {
+      setScraping(false);
+      setScrapeStatus("Last scraped " + relTimeAgo(s.last_run), "");
+    }
+  }
+
+  async function triggerScrape() {
+    setScraping(true);
+    setScrapeStatus("Scraping…", "running");
+    try {
+      const res = await fetch("/api/scrape?source=" + encodeURIComponent(state.source), { method: "POST" });
+      const data = await res.json();
+      if (!data.ok && data.error && data.error !== "already running") {
+        setScraping(false);
+        setScrapeStatus("Error: " + data.error, "error");
+        return;
+      }
+      pollScrape();
+    } catch (e) {
+      setScraping(false);
+      setScrapeStatus("Error: " + e.message, "error");
+    }
+  }
+
+  async function stopScrape() {
+    setScrapeStatus("Stopping…", "running");
+    try {
+      await fetch("/api/scrape/stop?source=" + encodeURIComponent(state.source), { method: "POST" });
+    } catch { /* the poller will reflect the final state */ }
+  }
+
+  function pollScrape() {
+    if (scrapePoll) return;  // single owner -- avoid stacking intervals
+    scrapePoll = setInterval(async () => {
+      const s = await fetchScrapeStatus();
+      if (s.status === "running") {
+        setScraping(true);
+        setScrapeStatus(s.added != null ? `Scraping… +${s.added} new` : "Scraping…", "running");
+        liveRefresh();  // stream new records into the grid + stats (no re-render of controls)
+      } else {
+        clearInterval(scrapePoll); scrapePoll = null;
+        const added = s.added != null ? s.added : (s.last_added != null ? s.last_added : 0);
+        toast(s.status === "error" ? "Scrape failed"
+              : s.status === "stopped" ? ("Stopped · +" + added + " new")
+              : ("Added " + added + " new"));
+        load(); // full refresh: data + tab counts + control status
+      }
+    }, 1500);
   }
 
   function copyIcon() {
@@ -518,36 +671,53 @@
 
   // ---- data ----
   let reqId = 0;
-  async function load() {
-    const my = ++reqId;
-    skeleton();
+
+  async function fetchEmails() {
     const params = new URLSearchParams({
       source: state.source, page: state.page, per_page: PER_PAGE, q: state.q, sort: state.sort,
     });
+    const res = await fetch("/api/emails?" + params.toString());
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return res.json();
+  }
+
+  function renderData(data) {
+    state.total = data.total; state.pages = data.total_pages; state.page = data.page;
+    if (!data.items.length) { emptyState(); resultMeta.textContent = ""; renderPager(); return; }
+    grid.className = "grid";
+    grid.innerHTML = data.items.map((r) => cardHTML(r, state.q)).join("");
+    const from = (data.page - 1) * data.per_page + 1;
+    const to = from + data.items.length - 1;
+    const noun = (state.noun || "Records").toLowerCase();
+    resultMeta.innerHTML = `Showing <b>${from}–${to}</b> of <b>${data.total.toLocaleString()}</b> ${state.q ? "matching " : ""}${noun}`;
+    renderPager();
+  }
+
+  async function load() {
+    const my = ++reqId;
+    skeleton();
     try {
-      const res = await fetch("/api/emails?" + params.toString());
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      const data = await res.json();
+      const data = await fetchEmails();
       if (my !== reqId) return; // stale response
       renderStats(data.stats);
       renderTabs(data.sources);
-      state.total = data.total; state.pages = data.total_pages; state.page = data.page;
-
-      if (!data.items.length) { emptyState(); resultMeta.textContent = ""; renderPager(); return; }
-
-      grid.className = "grid";
-      grid.innerHTML = data.items.map((r) => cardHTML(r, state.q)).join("");
-
-      const from = (data.page - 1) * data.per_page + 1;
-      const to = from + data.items.length - 1;
-      const noun = (state.noun || "Records").toLowerCase();
-      resultMeta.innerHTML = `Showing <b>${from}–${to}</b> of <b>${data.total.toLocaleString()}</b> ${state.q ? "matching " : ""}${noun}`;
-      renderPager();
+      renderRescrape(data.sources);
+      renderData(data);
     } catch (err) {
       if (my !== reqId) return;
       grid.className = "grid";
       grid.innerHTML = `<div class="empty">⚠️ Failed to load data.<br><small>${esc(err.message)}</small></div>`;
     }
+  }
+
+  // Lightweight refresh used while a scrape runs: update the grid + stats only,
+  // without rebuilding the tabs/rescrape controls (which would restart polling).
+  async function liveRefresh() {
+    try {
+      const data = await fetchEmails();
+      renderStats(data.stats);
+      renderData(data);
+    } catch { /* keep the last good view */ }
   }
 
   // ---- events ----

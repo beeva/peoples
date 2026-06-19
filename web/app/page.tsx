@@ -3,6 +3,7 @@ import EmailCard from "@/components/EmailCard";
 import Pagination from "@/components/Pagination";
 import SearchControls from "@/components/SearchControls";
 import CategoryTabs from "@/components/CategoryTabs";
+import RescrapeButton from "@/components/RescrapeButton";
 import ThemeToggle from "@/components/ThemeToggle";
 import Toaster from "@/components/Toaster";
 
@@ -88,7 +89,15 @@ export default async function Home({
       </header>
 
       <main className="wrap">
-        <CategoryTabs sources={result.sources} active={result.source} />
+        <div className="toolbar">
+          <CategoryTabs sources={result.sources} active={result.source} />
+          {result.source !== "all" && activeSource && (
+            <RescrapeButton
+              source={result.source as Exclude<typeof result.source, "all">}
+              label={activeSource.label}
+            />
+          )}
+        </div>
 
         <section className="stats">
           <StatCard num={stats.totalPosts.toLocaleString()} label={noun} />

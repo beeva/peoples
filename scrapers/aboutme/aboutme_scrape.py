@@ -74,13 +74,33 @@ def child_sitemaps() -> list[str]:
     return [u for u in locs if "SitemapUser_" in u]
 
 
-def iter_profile_urls(start_sitemap: str | None = None):
-    """Yield every https://about.me/<username> URL, one child sitemap at a time."""
+def _write_cursor(path: str | None, sitemap_url: str) -> None:
+    """Record the last child sitemap finished, so the next run resumes after it."""
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(sitemap_url.rsplit("/", 1)[-1])
+    except OSError:
+        pass
+
+
+def iter_profile_urls(start_sitemap: str | None = None, cursor_out: str | None = None):
+    """Yield every https://about.me/<username> URL, one child sitemap at a time.
+
+    After each child sitemap is fully walked, its filename is written to
+    `cursor_out` (if given) so a later run can `--start-sitemap` from there
+    instead of re-walking the whole index.
+    """
     children = child_sitemaps()
     if start_sitemap:
         children = [c for c in children if c.rsplit("/", 1)[-1] >= start_sitemap]
     print(f"  {len(children)} child sitemaps to walk", file=sys.stderr)
     for sm in children:
+        # Record the cursor at the START of each sitemap so a --limit/stopped run
+        # resumes from this same sitemap next time (already-saved usernames are
+        # skipped), instead of restarting from the top of the index.
+        _write_cursor(cursor_out, sm)
         raw = get_text(sm)
         if not raw:
             print(f"  ! failed sitemap {sm}", file=sys.stderr)
@@ -226,6 +246,8 @@ def main() -> int:
                     help="seconds between profile requests (default: 0.3)")
     ap.add_argument("--start-sitemap", default=None,
                     help="resume enumeration from this child sitemap filename")
+    ap.add_argument("--cursor-out", default=None,
+                    help="write the last finished child sitemap here (resume cursor)")
     ap.add_argument("--users", default=None,
                     help="comma-separated usernames to scrape instead of the sitemap")
     ap.add_argument("--exclude-location", default=None,
@@ -247,7 +269,7 @@ def main() -> int:
         urls = (f"https://about.me/{u.strip()}" for u in args.users.split(",") if u.strip())
     else:
         print(f"Enumerating profiles from {SITEMAP_INDEX} ...", file=sys.stderr)
-        urls = iter_profile_urls(args.start_sitemap)
+        urls = iter_profile_urls(args.start_sitemap, args.cursor_out)
 
     kept = scanned = 0
     with open(args.out, "a", encoding="utf-8") as out:

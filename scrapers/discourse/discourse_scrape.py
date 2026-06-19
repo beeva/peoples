@@ -161,6 +161,17 @@ def build_contacts(base: str, rec: dict) -> list[dict]:
     return contacts
 
 
+def _write_cursor(path: str | None, topic_id: int) -> None:
+    """Persist the highest topic id processed, so the next run resumes after it."""
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(str(topic_id))
+    except OSError:
+        pass
+
+
 # ---- main -----------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(description="Scrape all posts from a Discourse forum.")
@@ -173,6 +184,10 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="max topics to scrape (0 = all)")
     ap.add_argument("--delay", type=float, default=0.5, help="seconds between requests (default: 0.5)")
     ap.add_argument("--batch", type=int, default=50, help="post ids per batch request (default: 50)")
+    ap.add_argument("--since-topic-id", type=int, default=0,
+                    help="only scrape topics with id greater than this (resume checkpoint)")
+    ap.add_argument("--cursor-out", default=None,
+                    help="write the highest topic id processed here (resume cursor)")
     args = ap.parse_args()
     base = args.base.rstrip("/")
 
@@ -186,46 +201,62 @@ def main() -> int:
     topic_ids = enumerate_topic_ids(base)
     print(f"Found {len(topic_ids)} topics.", file=sys.stderr)
 
+    # Resume = skip topics we've already handled. Two independent guards:
+    #  * --since-topic-id: a high-water-mark checkpoint (topic ids are monotonic
+    #    on Discourse, so "id > cursor" reliably means "not yet scraped").
+    #  * the posts file (if present): exact set of done topic ids.
     done = load_done_keys(args.out, "topic_id")
-    if done:
-        print(f"Resuming: {len(done)} topics already in {args.out}, skipping them.", file=sys.stderr)
-    todo = [tid for tid in topic_ids if tid not in done]
+    # post ids already in the emails file -> never write a contact twice.
+    done_posts = load_done_keys(args.emails_out, "post_id")
+    todo = [tid for tid in topic_ids if tid > args.since_topic_id and tid not in done]
     if args.limit > 0:
         todo = todo[:args.limit]
-    print(f"Scraping {len(todo)} topics -> {args.out}", file=sys.stderr)
+    print(f"Resuming after topic_id={args.since_topic_id} "
+          f"({len(done)} in posts file, {len(done_posts)} contacts known); "
+          f"scraping {len(todo)} topics -> {args.out}", file=sys.stderr)
 
+    cursor = args.since_topic_id
     scraped = posts_total = contacts_total = 0
     with open(args.out, "a", encoding="utf-8") as out, \
             open(args.emails_out, "a", encoding="utf-8") as eout:
         for i, tid in enumerate(todo, 1):
             try:
                 rec = scrape_topic(base, tid, args.batch, args.delay)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 -- leave cursor untouched so we retry next run
                 print(f"  [{i}/{len(todo)}] ! topic {tid}: {e}", file=sys.stderr)
                 time.sleep(2)
                 continue
             if not rec:
                 print(f"  [{i}/{len(todo)}] - topic {tid}: skipped (deleted/empty)", file=sys.stderr)
-                continue
-            out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            out.flush()
-            scraped += 1
-            posts_total += len(rec["posts"])
+            else:
+                out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                out.flush()
+                scraped += 1
+                posts_total += len(rec["posts"])
 
-            contacts = build_contacts(base, rec)
-            for c in contacts:
-                eout.write(json.dumps(c, ensure_ascii=False) + "\n")
-            if contacts:
-                eout.flush()
-                contacts_total += len(contacts)
-            email_note = f" | {len(contacts)} w/ email" if contacts else ""
-            print(f"  [{i}/{len(todo)}] + topic {tid}: {len(rec['posts'])} posts{email_note} "
-                  f"| {rec['title'][:50]}", file=sys.stderr)
+                new_contacts = 0
+                for c in build_contacts(base, rec):
+                    if c["post_id"] in done_posts:
+                        continue  # already recorded -- never duplicate
+                    done_posts.add(c["post_id"])
+                    eout.write(json.dumps(c, ensure_ascii=False) + "\n")
+                    new_contacts += 1
+                if new_contacts:
+                    eout.flush()
+                    contacts_total += new_contacts
+                email_note = f" | {new_contacts} w/ email" if new_contacts else ""
+                print(f"  [{i}/{len(todo)}] + topic {tid}: {len(rec['posts'])} posts{email_note} "
+                      f"| {rec['title'][:50]}", file=sys.stderr)
+
+            # advance + persist the checkpoint after each handled topic
+            cursor = max(cursor, tid)
+            _write_cursor(args.cursor_out, cursor)
             time.sleep(args.delay)
 
-    print(f"\nDone. Scraped {scraped} topics, {posts_total} posts this run.", file=sys.stderr)
+    print(f"\nDone. Scraped {scraped} topics, {posts_total} posts this run "
+          f"(checkpoint topic_id={cursor}).", file=sys.stderr)
     print(f"  all posts   -> {args.out}", file=sys.stderr)
-    print(f"  {contacts_total} posts with email(s) -> {args.emails_out}", file=sys.stderr)
+    print(f"  {contacts_total} new posts with email(s) -> {args.emails_out}", file=sys.stderr)
     return 0
 
 

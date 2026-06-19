@@ -78,12 +78,52 @@ posts with apply/messaging links + tags, or profiles with role/location).
 ### API
 
 ```
-GET /api/emails?source=all|discourse|devto|aboutme&q=&sort=newest|oldest&page=&per_page=
-GET /api/stats?source=...
+GET  /api/emails?source=all|discourse|devto|aboutme&q=&sort=newest|oldest&page=&per_page=
+GET  /api/stats?source=...
+POST /api/scrape?source=discourse|devto|aboutme[&pages=&limit=&full=1]   # start a re-scrape
+POST /api/scrape/stop?source=...                                         # stop a running job
+GET  /api/scrape/status?source=...                                       # poll a job (live added count)
 ```
 
-`source` defaults to `all`. Each response also returns the `sources` list (with
-per-source counts) used to render the selector.
+`source` defaults to `all`. Each `/api/emails` response also returns the
+`sources` list (with per-source counts) used to render the selector.
+
+## Re-scraping from the UI
+
+Selecting a single source (any tab except **All**) reveals a **Rescrape**
+button. It runs that source's scraper as a background job on the data server
+and streams progress.
+
+- **Real-time updates** — the server re-reads the source from disk every ~2s
+  while the scrape runs, and the UI refreshes on the same cadence, so new
+  records (and the running `+N new` count) appear live instead of only at the
+  end. The scrapers flush incrementally (dev.to writes atomically after each
+  hit), so what you see is always consistent.
+- **Stop** — a **Stop** button appears while scraping. It terminates the job
+  but **keeps everything collected so far** (the run is marked `stopped`, not
+  failed). Because each source is incremental, clicking **Rescrape** again
+  simply continues from where it left off.
+
+Every scrape is **incremental** — it only fetches what isn't already stored, so
+re-scraping is cheap and safe to repeat:
+
+| source      | resume checkpoint                          | how new content is found                                   |
+| ----------- | ------------------------------------------ | ---------------------------------------------------------- |
+| `discourse` | highest `topic_id` scraped (high-water mark) | re-scrapes only topics with `id >` the checkpoint; contacts also de-duped by `post_id` so a revisit never writes twice |
+| `devto`     | article `id`s in `jobs.json`               | pages newest-first, stops once a page is fully known        |
+| `aboutme`   | last sitemap walked + saved `username`s    | resumes from the saved sitemap cursor, skips known usernames |
+
+**Checkpointing.** Each scrape advances its checkpoint after every item and
+persists it to `scrapers/state.json` (git-ignored) via a per-source `.cursor`
+file. So re-scraping always continues **after** the last point — it never
+re-fetches what's already saved, even across stops, restarts, or `--limit`-bounded
+runs. The discourse checkpoint is seeded on first run from the highest `topic_id`
+already in the data, so an initial re-scrape jumps straight to genuinely new
+topics. (Pass `full=1` to dev.to, or delete `state.json`, to rebuild from scratch.) UI-triggered runs are bounded
+(`devto` → `--pages 3`, `aboutme` → `--limit 50`, `discourse` → `--limit 300`)
+so each click returns promptly; click again to continue where it left off. Pass
+`pages` / `limit` query params to override, or `full=1` (dev.to) to rebuild from
+scratch. Run a scraper directly (see above) for an unbounded crawl.
 
 ### Prerequisites
 

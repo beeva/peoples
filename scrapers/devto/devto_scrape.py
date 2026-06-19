@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -76,6 +77,58 @@ def get_json(url: str):
                  tries=3, none_on=())
 
 
+def load_existing(path: str) -> list[dict]:
+    """Load previously-scraped job posts (the JSON array), or [] if none."""
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def write_out(path: str, by_id: dict) -> int:
+    """Atomically write the merged posts (newest first). Returns the count.
+
+    Writes to a temp file then renames, so a server reading the file
+    concurrently (for live updates) never sees a half-written array.
+    """
+    merged = sorted(by_id.values(), key=lambda r: r.get("published_at") or "", reverse=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    return len(merged)
+
+
+def scrape_article(stub_id) -> dict | None:
+    """Fetch one full article and return its contact record, or None."""
+    art = get_json(f"{API}/articles/{stub_id}")
+    body = f"{art.get('title', '')}\n{art.get('body_markdown') or ''}"
+    contact = {
+        "emails": extract_emails(body, include_mailto=False),
+        "mailto": extract_mailto(body),
+        "apply_links": extract_apply_links(body),
+        "messaging": extract_messaging(body),
+    }
+    if not has_contact(contact):
+        return None
+    return {
+        "id": art.get("id"),
+        "title": art.get("title", ""),
+        "url": art.get("url"),
+        "published_at": art.get("published_at"),
+        "author": (art.get("user") or {}).get("name"),
+        "organization": (art.get("organization") or {}).get("name"),
+        "tags": art.get("tag_list"),
+        "reading_time_minutes": art.get("reading_time_minutes"),
+        "contact": contact,
+        "description": art.get("body_markdown"),
+    }
+
+
 # ---- main -----------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(description="Scrape dev.to job posts for contact info.")
@@ -85,14 +138,24 @@ def main() -> int:
     ap.add_argument("--per-page", type=int, default=50, help="articles per page (default: 50)")
     ap.add_argument("--out", default=str(SCRIPT_DIR / "jobs.json"),
                     help="output JSON file (default: scrapers/devto/jobs.json)")
+    ap.add_argument("--full", action="store_true",
+                    help="re-scrape everything (ignore already-saved posts)")
     args = ap.parse_args()
 
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
-    print(f"Scraping dev.to tags=[{', '.join(tags)}] pages={args.pages} "
-          f"per_page={args.per_page}", file=sys.stderr)
 
-    # 1. Collect candidate article stubs across tags + pages, deduped by id.
-    stubs: dict[int, dict] = {}
+    # Incremental by default: keep already-saved posts and skip their ids.
+    # dev.to lists newest-first, so once a whole page is already known we can
+    # stop paging that tag -- everything older is known too.
+    existing = [] if args.full else load_existing(args.out)
+    by_id: dict = {r.get("id"): r for r in existing if r.get("id") is not None}
+    known_ids = set(by_id)
+    mode = "full re-scrape" if args.full else f"incremental ({len(known_ids)} known)"
+    print(f"Scraping dev.to tags=[{', '.join(tags)}] pages={args.pages} "
+          f"per_page={args.per_page} -- {mode}", file=sys.stderr)
+
+    # 1. Collect NEW candidate article stubs across tags + pages.
+    stubs: dict = {}
     for tag in tags:
         for page in range(1, args.pages + 1):
             url = f"{API}/articles?tag={urllib.parse.quote(tag)}&per_page={args.per_page}&page={page}"
@@ -103,53 +166,43 @@ def main() -> int:
                 break
             if not isinstance(lst, list) or not lst:
                 break
+            new_on_page = 0
             for a in lst:
-                stubs.setdefault(a["id"], a)
-            print(f"  tag={tag} page={page}: +{len(lst)} (total unique {len(stubs)})",
-                  file=sys.stderr)
+                aid = a["id"]
+                if aid in known_ids or aid in stubs:
+                    continue
+                stubs[aid] = a
+                new_on_page += 1
+            print(f"  tag={tag} page={page}: {len(lst)} listed, +{new_on_page} new "
+                  f"(queued {len(stubs)})", file=sys.stderr)
             time.sleep(0.3)  # be polite
+            if not args.full and new_on_page == 0:
+                print(f"  tag={tag}: page fully known -> stop paging", file=sys.stderr)
+                break
 
-    # 2. Fetch each full article and scan its body for contact info.
-    results = []
+    # 2. Fetch each NEW full article and scan its body for contact info.
+    added = 0
     total = len(stubs)
-    for i, stub in enumerate(stubs.values(), 1):
+    for i, stub_id in enumerate(stubs, 1):
         try:
-            art = get_json(f"{API}/articles/{stub['id']}")
+            rec = scrape_article(stub_id)
         except Exception as e:  # noqa: BLE001
-            print(f"  ! article {stub['id']}: {e}", file=sys.stderr)
+            print(f"  ! article {stub_id}: {e}", file=sys.stderr)
             continue
-        body = f"{art.get('title', '')}\n{art.get('body_markdown') or ''}"
-        contact = {
-            "emails": extract_emails(body, include_mailto=False),
-            "mailto": extract_mailto(body),
-            "apply_links": extract_apply_links(body),
-            "messaging": extract_messaging(body),
-        }
-        title = art.get("title", "")
-        if has_contact(contact):
-            results.append({
-                "id": art.get("id"),
-                "title": title,
-                "url": art.get("url"),
-                "published_at": art.get("published_at"),
-                "author": (art.get("user") or {}).get("name"),
-                "organization": (art.get("organization") or {}).get("name"),
-                "tags": art.get("tag_list"),
-                "reading_time_minutes": art.get("reading_time_minutes"),
-                "contact": contact,
-                "description": art.get("body_markdown"),
-            })
-            print(f"  [{i}/{total}] + contact found: {title[:60]}", file=sys.stderr)
+        if rec is not None:
+            by_id[rec["id"]] = rec
+            added += 1
+            # flush after each new hit so progress is visible live + survives a stop
+            write_out(args.out, by_id)
+            print(f"  [{i}/{total}] + contact found: {rec['title'][:60]}", file=sys.stderr)
         else:
-            print(f"  [{i}/{total}] - no contact: {title[:60]}", file=sys.stderr)
+            print(f"  [{i}/{total}] - no contact", file=sys.stderr)
         time.sleep(0.25)  # polite throttle
 
-    # 3. Output.
-    results.sort(key=lambda r: r.get("published_at") or "", reverse=True)
-    with open(args.out, "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
-    print(f"\nDone. {len(results)}/{total} job posts had contact info -> {args.out}",
-          file=sys.stderr)
+    # 3. Final write (ensures output exists even when nothing new was found).
+    total_out = write_out(args.out, by_id)
+    print(f"\nDone. +{added} new job posts with contact info "
+          f"({total_out} total) -> {args.out}", file=sys.stderr)
     return 0
 
 
