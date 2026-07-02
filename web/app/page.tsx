@@ -1,15 +1,21 @@
-import { fetchEmails, PER_PAGE, type SourceKey } from "@/lib/emails";
-import EmailCard from "@/components/EmailCard";
+import {
+  fetchEmails,
+  parseMessaged,
+  PER_PAGE,
+  type SourceKey,
+} from "@/lib/emails";
+import EmailTable from "@/components/EmailTable";
 import Pagination from "@/components/Pagination";
 import SearchControls from "@/components/SearchControls";
 import CategoryTabs from "@/components/CategoryTabs";
+import StatusFilter from "@/components/StatusFilter";
 import RescrapeButton from "@/components/RescrapeButton";
 import ThemeToggle from "@/components/ThemeToggle";
 import Toaster from "@/components/Toaster";
 
 type SearchParams = Promise<{ [key: string]: string | string[] | undefined }>;
 
-const VALID_SOURCES = new Set(["all", "discourse", "devto", "aboutme"]);
+const VALID_SOURCES = new Set(["all", "discourse", "aboutme"]);
 
 function first(v: string | string[] | undefined): string {
   return Array.isArray(v) ? (v[0] ?? "") : (v ?? "");
@@ -35,8 +41,9 @@ export default async function Home({
   const page = Math.max(1, parseInt(first(sp.page) || "1", 10) || 1);
   const sourceParam = first(sp.source);
   const source: SourceKey = VALID_SOURCES.has(sourceParam) ? sourceParam : "all";
+  const messaged = parseMessaged(first(sp.messaged));
 
-  const result = await fetchEmails(source, q, sort, page, PER_PAGE);
+  const result = await fetchEmails(source, q, sort, page, PER_PAGE, messaged);
   const stats = result.stats;
   const noun = stats.noun || "Records";
   const activeSource = result.sources.find((s) => s.key === result.source);
@@ -48,6 +55,7 @@ export default async function Home({
   if (q) baseParams.q = q;
   if (sort !== "newest") baseParams.sort = sort;
   if (result.source !== "all") baseParams.source = result.source;
+  if (result.messaged !== "all") baseParams.messaged = result.messaged;
 
   const range =
     stats.earliest && stats.latest
@@ -56,7 +64,7 @@ export default async function Home({
 
   const subtitle = activeSource
     ? activeSource.key === "all"
-      ? "Contacts scraped from three.js, dev.to & about.me"
+      ? "Contacts scraped from three.js & about.me"
       : `Contacts from ${activeSource.label}`
     : "Scraped contact directory";
 
@@ -114,6 +122,10 @@ export default async function Home({
 
         <SearchControls initialQuery={q} initialSort={sort} />
 
+        <div className="filter-row">
+          <StatusFilter active={result.messaged} counts={result.messagedCounts} />
+        </div>
+
         {result.error && (
           <div className="banner" role="alert">
             <svg
@@ -148,11 +160,7 @@ export default async function Home({
         </div>
 
         {result.items.length > 0 ? (
-          <div className="grid">
-            {result.items.map((record) => (
-              <EmailCard key={record.id} record={record} query={q} />
-            ))}
-          </div>
+          <EmailTable items={result.items} query={q} />
         ) : (
           <div className="empty">
             <svg

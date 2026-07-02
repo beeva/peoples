@@ -16,6 +16,8 @@ __pycache__/
 # Scraper runtime state (not source)
 scrapers/state.json
 scrapers/**/.cursor
+scrapers/enrich_cache.json
+scrapers/sent.json
 
 # Local env
 .env

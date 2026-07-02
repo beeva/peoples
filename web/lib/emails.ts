@@ -2,6 +2,12 @@ import "server-only";
 
 export type SourceKey = "all" | "discourse" | "devto" | "aboutme" | string;
 
+export interface PostRef {
+  title: string;
+  url: string;
+  createdAt: string;
+}
+
 export interface EmailRecord {
   id: string;
   source: SourceKey;
@@ -18,6 +24,15 @@ export interface EmailRecord {
   applyLinks: string[];
   messaging: string[];
   links: string[];
+  posts: PostRef[];
+  postCount: number;
+  country: string;
+  countryCode: string;
+  gender: string;
+  messaged: boolean;
+  messagedCount: number;
+  messagedAt: string;
+  messagedTo: string;
 }
 
 export interface Stats {
@@ -36,6 +51,27 @@ export interface SourceInfo {
   count: number;
 }
 
+export type MessagedKey = "sent" | "unsent";
+/** Normalized selection: "all", a single key, or both keys joined. */
+export type MessagedFilter = "all" | "sent" | "unsent" | "sent,unsent";
+
+export interface MessagedCounts {
+  all: number;
+  sent: number;
+  unsent: number;
+}
+
+/** Parse a raw `messaged` value (comma list) into a normalized filter. */
+export function parseMessaged(v: string | undefined): MessagedFilter {
+  const set = new Set(
+    (v || "").split(",").map((s) => s.trim()).filter((s) => s === "sent" || s === "unsent"),
+  );
+  if (set.has("sent") && set.has("unsent")) return "sent,unsent";
+  if (set.has("sent")) return "sent";
+  if (set.has("unsent")) return "unsent";
+  return "all";
+}
+
 export interface QueryResult {
   items: EmailRecord[];
   total: number;
@@ -43,6 +79,8 @@ export interface QueryResult {
   perPage: number;
   totalPages: number;
   source: SourceKey;
+  messaged: MessagedFilter;
+  messagedCounts: MessagedCounts;
   stats: Stats;
   sources: SourceInfo[];
   error: string | null;
@@ -85,6 +123,15 @@ interface RawItem {
   apply_links?: string[];
   messaging?: string[];
   links?: string[];
+  posts?: { title?: string; url?: string; created_at?: string }[];
+  post_count?: number;
+  country?: string;
+  country_code?: string;
+  gender?: string;
+  messaged?: boolean;
+  messaged_count?: number;
+  messaged_at?: string;
+  messaged_to?: string;
 }
 
 interface RawStats {
@@ -110,6 +157,8 @@ interface RawResponse {
   per_page?: number;
   total_pages?: number;
   source?: string;
+  messaged?: string;
+  messaged_counts?: { all?: number; sent?: number; unsent?: number };
   stats?: RawStats;
   sources?: RawSource[];
 }
@@ -131,6 +180,21 @@ function mapItem(it: RawItem, idx: number): EmailRecord {
     applyLinks: Array.isArray(it.apply_links) ? it.apply_links : [],
     messaging: Array.isArray(it.messaging) ? it.messaging : [],
     links: Array.isArray(it.links) ? it.links : [],
+    posts: Array.isArray(it.posts)
+      ? it.posts.map((p) => ({
+          title: p.title ?? "",
+          url: p.url ?? "",
+          createdAt: p.created_at ?? "",
+        }))
+      : [],
+    postCount: it.post_count ?? 1,
+    country: it.country ?? "",
+    countryCode: it.country_code ?? "",
+    gender: it.gender ?? "",
+    messaged: Boolean(it.messaged),
+    messagedCount: it.messaged_count ?? 0,
+    messagedAt: it.messaged_at ?? "",
+    messagedTo: it.messaged_to ?? "",
   };
 }
 
@@ -163,6 +227,7 @@ export async function fetchEmails(
   sort: "newest" | "oldest",
   page: number,
   perPage: number = PER_PAGE,
+  messaged: MessagedFilter = "all",
 ): Promise<QueryResult> {
   const params = new URLSearchParams({
     source,
@@ -171,6 +236,7 @@ export async function fetchEmails(
     sort,
   });
   if (q) params.set("q", q);
+  if (messaged !== "all") params.set("messaged", messaged);
 
   const url = `${API_BASE_URL}/api/emails?${params.toString()}`;
 
@@ -187,6 +253,12 @@ export async function fetchEmails(
       perPage: data.per_page ?? perPage,
       totalPages: data.total_pages ?? 1,
       source: data.source ?? source,
+      messaged: parseMessaged(data.messaged ?? messaged),
+      messagedCounts: {
+        all: data.messaged_counts?.all ?? 0,
+        sent: data.messaged_counts?.sent ?? 0,
+        unsent: data.messaged_counts?.unsent ?? 0,
+      },
       stats: mapStats(data.stats),
       sources: mapSources(data.sources),
       error: null,
@@ -200,9 +272,50 @@ export async function fetchEmails(
       perPage,
       totalPages: 1,
       source,
+      messaged,
+      messagedCounts: { all: 0, sent: 0, unsent: 0 },
       stats: EMPTY_STATS,
       sources: FALLBACK_SOURCES,
       error: `Could not reach the data server at ${API_BASE_URL} (${message}).`,
     };
+  }
+}
+
+// ---- Single-contact detail (all posts, full text) ----
+export interface PostFull {
+  title: string;
+  url: string;
+  createdAt: string;
+  text: string;
+}
+
+export interface EmailDetail extends EmailRecord {
+  postsFull: PostFull[];
+}
+
+interface RawDetail extends RawItem {
+  posts_full?: { title?: string; url?: string; created_at?: string; text?: string }[];
+}
+
+/** Fetch one merged contact with every occurrence's full text. */
+export async function fetchEmailDetail(id: string): Promise<EmailDetail | null> {
+  const url = `${API_BASE_URL}/api/email?id=${encodeURIComponent(id)}`;
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`Data server responded ${res.status}`);
+    const it: RawDetail = await res.json();
+    const base = mapItem(it, 0);
+    const postsFull: PostFull[] = Array.isArray(it.posts_full)
+      ? it.posts_full.map((p) => ({
+          title: p.title ?? "",
+          url: p.url ?? "",
+          createdAt: p.created_at ?? "",
+          text: p.text ?? "",
+        }))
+      : [];
+    return { ...base, postsFull };
+  } catch {
+    return null;
   }
 }
