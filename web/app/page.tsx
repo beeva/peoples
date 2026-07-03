@@ -1,3 +1,4 @@
+import Link from "next/link";
 import {
   fetchEmails,
   parseMessaged,
@@ -92,7 +93,12 @@ export default async function Home({
               <p>{subtitle}</p>
             </div>
           </div>
-          <ThemeToggle />
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <Link href="/slack" className="tab">
+              Slack Users
+            </Link>
+            <ThemeToggle />
+          </div>
         </div>
       </header>
 

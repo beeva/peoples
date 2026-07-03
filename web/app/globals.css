@@ -1468,3 +1468,115 @@ mark {
     align-items: stretch;
   }
 }
+
+/* ---------- Slack users view ---------- */
+.slack-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.slack-search {
+  flex: 1;
+  min-width: 220px;
+  max-width: 420px;
+  padding: 9px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+}
+.slack-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+/* Photo avatars keep their aspect ratio. */
+img.avatar {
+  object-fit: cover;
+}
+.slack-row {
+  cursor: pointer;
+}
+.slack-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.slack-table thead th[data-kind="bool"],
+.slack-table tbody td[data-kind="bool"] {
+  text-align: center;
+}
+.slack-table tbody td {
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.slack-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.slack-more {
+  display: flex;
+  justify-content: center;
+  margin: 20px 0 8px;
+}
+.slack-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.slack-detail-head .avatar.lg {
+  width: 72px;
+  height: 72px;
+  flex: none;
+}
+.slack-detail-id {
+  min-width: 0;
+}
+.slack-detail-id h2 {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0;
+}
+.slack-detail-title {
+  color: var(--text-dim);
+  font-size: 13.5px;
+  margin: 3px 0 0;
+}
+.slack-detail-email {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 13.5px;
+  color: var(--accent);
+}
+.slack-detail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+}
+.slack-detail-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.slack-detail-row dt {
+  color: var(--text-faint);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.slack-detail-row dd {
+  margin: 0;
+  font-size: 13.5px;
+  word-break: break-word;
+}
