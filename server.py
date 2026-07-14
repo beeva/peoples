@@ -106,6 +106,8 @@ ENRICH_SEEN: set = set()     # emails queued/done this run (avoid re-enqueue)
 # ---- sent-message log (which contacts we've emailed) ----------------------
 # Persisted to disk so "Sent" badges survive restarts. Keyed by recipient
 # email (lowercased); a contact counts as messaged if ANY of its emails match.
+# Entries written by /api/message/mark carry "manual": true -- the contact was
+# emailed outside this app, so there is no body/subject to remember.
 SENT_FILE = SCRAPERS_DIR / "sent.json"
 SENT_LOCK = threading.Lock()
 SENT_LOG: dict = {}          # recipient email -> {"count","last_sent","last_subject"}
@@ -433,7 +435,7 @@ PUBLIC_FIELDS = (
     "created_at", "preview", "tags", "location", "organization",
     "apply_links", "messaging", "links", "posts", "post_count",
     "country", "country_code", "gender",
-    "messaged", "messaged_count", "messaged_at", "messaged_to",
+    "messaged", "messaged_count", "messaged_at", "messaged_to", "messaged_manual",
 )
 
 # In-memory dataset, guarded by DATA_LOCK (ThreadingHTTPServer is multi-threaded).
@@ -1004,7 +1006,7 @@ def _save_sent_log() -> None:
 
 def _sent_for(emails) -> dict:
     """Aggregate send history across all of a contact's emails."""
-    out = {"count": 0, "last_sent": "", "to": ""}
+    out = {"count": 0, "last_sent": "", "to": "", "manual": False}
     with SENT_LOCK:
         for e in emails or []:
             ent = SENT_LOG.get(e)
@@ -1014,6 +1016,7 @@ def _sent_for(emails) -> dict:
             if ent.get("last_sent", "") >= out["last_sent"]:
                 out["last_sent"] = ent.get("last_sent", "")
                 out["to"] = e
+                out["manual"] = bool(ent.get("manual"))
     return out
 
 
@@ -1023,6 +1026,7 @@ def _set_sent_fields(rec: dict) -> None:
     rec["messaged_count"] = snt["count"]
     rec["messaged_at"] = snt["last_sent"]
     rec["messaged_to"] = snt["to"]
+    rec["messaged_manual"] = snt["manual"]
 
 
 def _apply_sent(email: str) -> None:
@@ -1046,6 +1050,42 @@ def _record_sent(to_addr: str, subject: str) -> None:
         SENT_LOG[key] = ent
     _save_sent_log()
     _apply_sent(key)
+
+
+def _mark_sent(rec_id: str, sent: bool) -> dict | None:
+    """Flip a contact's sent flag by hand, for emails sent outside this app.
+
+    Marking sent logs the primary address; marking unsent forgets every address
+    of the contact, including real sends -- that is what "unsent" has to mean
+    for the badge and the sent/unsent filter to agree with each other.
+    """
+    with DATA_LOCK:
+        rec = RECORD_BY_ID.get(rec_id or "")
+    if rec is None:
+        return None
+    emails = [e.strip().lower() for e in (rec.get("emails") or []) if e.strip()]
+    if not emails:
+        return None
+
+    with SENT_LOCK:
+        if sent:
+            ent = SENT_LOG.get(emails[0]) or {}
+            if ent.get("count", 0) <= 0:
+                ent = {"count": 1, "last_sent": _now_iso(), "last_subject": "",
+                       "manual": True}
+            SENT_LOG[emails[0]] = ent
+        else:
+            for e in emails:
+                SENT_LOG.pop(e, None)
+    _save_sent_log()
+
+    with DATA_LOCK:
+        _set_sent_fields(rec)
+    for e in emails:
+        _apply_sent(e)  # other records may share one of these addresses
+    return {k: rec.get(k) for k in
+            ("id", "messaged", "messaged_count", "messaged_at", "messaged_to",
+             "messaged_manual")}
 
 
 def query_records(source: str, q: str, sort: str, page: int, per_page: int,
@@ -1143,6 +1183,7 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/emails", "/api/email?id=", "/api/stats",
                     "/api/scrape", "/api/scrape/status", "/api/scrape/stop",
                     "/api/message/generate", "/api/message/send",
+                    "/api/message/mark",
                 ],
             })
             return
@@ -1208,6 +1249,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, **result})
             except Exception as e:  # noqa: BLE001 -- surface the reason to the UI
                 self._send_json({"ok": False, "error": str(e)}, 502)
+            return
+
+        if parsed.path == "/api/message/mark":
+            data = self._read_json_body()
+            view = _mark_sent(data.get("id") or "", bool(data.get("sent")))
+            if view is None:
+                self._send_json({"ok": False, "error": "unknown contact id"}, 404)
+            else:
+                self._send_json({"ok": True, **view})
             return
 
         if parsed.path == "/api/message/send":

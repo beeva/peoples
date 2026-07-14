@@ -25,7 +25,7 @@ export function genderDisplay(gender: string): string {
 }
 
 /** A "Sent Jun 19, 2026" tooltip for a contact we've emailed (count-aware). */
-export function sentLabel(messagedAt: string, count: number): string {
+export function sentLabel(messagedAt: string, count: number, manual = false): string {
   let when = "";
   if (messagedAt) {
     const d = new Date(messagedAt);
@@ -37,6 +37,7 @@ export function sentLabel(messagedAt: string, count: number): string {
       });
     }
   }
+  if (manual) return when ? `Marked as sent on ${when}` : "Marked as sent";
   const times = count > 1 ? ` (${count}×)` : "";
   return when ? `Last emailed ${when}${times}` : `Email sent${times}`;
 }

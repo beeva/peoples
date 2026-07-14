@@ -1,9 +1,59 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { Column } from "@/lib/slack";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import type { Column, DisplayUser } from "@/lib/slack";
 
-const PAGE = 100;
+const PER_PAGE = 50;
+
+type SortDir = "asc" | "desc";
+type Sort = { key: string; dir: SortDir };
+
+/** Value used for sorting a user by a given column key. */
+function sortValue(u: DisplayUser, key: string): unknown {
+  if (key === "__name") return u.name.toLowerCase();
+  if (key === "__freq") return u.freq;
+  const v = u.fields[key];
+  return typeof v === "string" ? v.toLowerCase() : v;
+}
+
+/** Empties always sort last; otherwise numeric/boolean/locale compare. */
+function compareUsers(a: DisplayUser, b: DisplayUser, sort: Sort): number {
+  const av = sortValue(a, sort.key);
+  const bv = sortValue(b, sort.key);
+  const ae = av === "" || av === null || av === undefined;
+  const be = bv === "" || bv === null || bv === undefined;
+  if (ae && be) return 0;
+  if (ae) return 1;
+  if (be) return -1;
+  let r: number;
+  if (typeof av === "number" && typeof bv === "number") r = av - bv;
+  else if (typeof av === "boolean" && typeof bv === "boolean")
+    r = av === bv ? 0 : av ? -1 : 1;
+  else r = String(av).localeCompare(String(bv));
+  return sort.dir === "asc" ? r : -r;
+}
+
+/** Compact page-number list with ellipses, e.g. [1, "…", 7, 8, 9, "…", 40]. */
+function buildPages(cur: number, total: number): (number | "…")[] {
+  const range: number[] = [];
+  for (let i = Math.max(2, cur - 1); i <= Math.min(total - 1, cur + 1); i++)
+    range.push(i);
+  const all = [1, ...range, total].filter(
+    (v, i, a) => a.indexOf(v) === i && v >= 1 && v <= total,
+  );
+  const out: (number | "…")[] = [];
+  let prev = 0;
+  for (const p of all) {
+    if (prev) {
+      if (p - prev === 2) out.push(prev + 1);
+      else if (p - prev > 2) out.push("…");
+    }
+    out.push(p);
+    prev = p;
+  }
+  return out;
+}
 
 const AVATAR_COLORS: [string, string][] = [
   ["#6ea8fe", "#3b6fd4"],
@@ -24,7 +74,6 @@ function gradient(seed: string): string {
 function formatDate(v: unknown): string {
   const n = typeof v === "number" ? v : Number(v);
   if (!Number.isFinite(n) || n <= 0) return "";
-  // Slack timestamps are seconds; anything smaller than ~year 2001 in ms is odd.
   const d = new Date(n < 1e12 ? n * 1000 : n);
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleDateString("en-US", {
@@ -59,31 +108,49 @@ function Cell({ col, value }: { col: Column; value: unknown }) {
   }
 }
 
-type Row = Record<string, unknown>;
-
-function Avatar({ row, size }: { row: Row; size: "sm" | "lg" }) {
-  const name = String(row.__name || "?");
-  const avatar = String(row.__avatar || "");
-  if (avatar) {
+function Avatar({ user, size }: { user: DisplayUser; size: "sm" | "lg" }) {
+  if (user.avatar) {
     // eslint-disable-next-line @next/next/no-img-element
-    return <img className={`avatar ${size}`} src={avatar} alt="" loading="lazy" />;
+    return (
+      <img className={`avatar ${size}`} src={user.avatar} alt="" loading="lazy" />
+    );
   }
   return (
-    <div className={`avatar ${size}`} style={{ background: gradient(name) }}>
-      {(name.trim()[0] || "?").toUpperCase()}
+    <div className={`avatar ${size}`} style={{ background: gradient(user.name) }}>
+      {(user.name.trim()[0] || "?").toUpperCase()}
     </div>
   );
 }
 
+function ServerChips({ user }: { user: DisplayUser }) {
+  return (
+    <span className="server-chips">
+      {user.servers.map((s) => (
+        <span key={s.slug} className="server-chip">
+          {s.name}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 function DetailPanel({
-  row,
+  user,
   columns,
+  initialServer,
   onClose,
 }: {
-  row: Row;
+  user: DisplayUser;
   columns: Column[];
+  initialServer?: string;
   onClose: () => void;
 }) {
+  const [tab, setTab] = useState(
+    () =>
+      user.serverData.find((s) => s.slug === initialServer)?.slug ??
+      user.serverData[0].slug,
+  );
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
@@ -97,11 +164,10 @@ function DetailPanel({
     };
   }, [onClose]);
 
-  const name = String(row.__name || "Unknown");
-  const email = row["profile.email"];
-  const title = row["profile.title"];
+  const active =
+    user.serverData.find((s) => s.slug === tab) ?? user.serverData[0];
   const fields = columns.filter((c) => {
-    const v = row[c.key];
+    const v = active.fields[c.key];
     return v !== "" && v !== null && v !== undefined;
   });
 
@@ -116,7 +182,7 @@ function DetailPanel({
         className="drawer"
         role="dialog"
         aria-modal="true"
-        aria-label={`${name} details`}
+        aria-label={`${user.name} details`}
       >
         <div className="drawer-bar">
           <button className="drawer-close" onClick={onClose} aria-label="Close">
@@ -128,16 +194,33 @@ function DetailPanel({
         </div>
         <div className="drawer-body">
           <div className="slack-detail-head">
-            <Avatar row={row} size="lg" />
+            <Avatar user={user} size="lg" />
             <div className="slack-detail-id">
-              <h2>{name}</h2>
-              {title ? <p className="slack-detail-title">{String(title)}</p> : null}
-              {email ? (
-                <a className="slack-detail-email" href={`mailto:${email}`}>
-                  {String(email)}
+              <h2>{user.name}</h2>
+              {user.email ? (
+                <a className="slack-detail-email" href={`mailto:${user.email}`}>
+                  {user.email}
                 </a>
               ) : null}
+              <p className="slack-detail-freq">
+                Member of {user.freq} server{user.freq === 1 ? "" : "s"}
+              </p>
             </div>
+          </div>
+
+          {/* One tab per server this person belongs to. */}
+          <div className="tabs slack-detail-tabs" role="tablist">
+            {user.serverData.map((s) => (
+              <button
+                key={s.slug}
+                role="tab"
+                aria-selected={s.slug === active.slug}
+                className={`tab${s.slug === active.slug ? " active" : ""}`}
+                onClick={() => setTab(s.slug)}
+              >
+                {s.name}
+              </button>
+            ))}
           </div>
 
           <dl className="slack-detail-list">
@@ -145,7 +228,7 @@ function DetailPanel({
               <div key={c.key} className="slack-detail-row">
                 <dt>{c.label}</dt>
                 <dd>
-                  <Cell col={c} value={row[c.key]} />
+                  <Cell col={c} value={active.fields[c.key]} />
                 </dd>
               </div>
             ))}
@@ -158,29 +241,97 @@ function DetailPanel({
 
 export default function SlackUsersTable({
   columns,
-  rows,
+  users,
+  view,
 }: {
   columns: Column[];
-  rows: Row[];
+  users: DisplayUser[];
+  view: string;
 }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [q, setQ] = useState("");
-  const [limit, setLimit] = useState(PAGE);
-  const [selected, setSelected] = useState<Row | null>(null);
+  const [page, setPage] = useState(1);
+  const [sort, setSort] = useState<Sort>({ key: "__name", dir: "asc" });
+
+  // The open user lives in the URL (?user=<key>) so detail views are shareable.
+  const userKey = searchParams.get("user");
+  const selected = userKey
+    ? (users.find((u) => u.key === userKey) ?? null)
+    : null;
+
+  function open(user: DisplayUser) {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("user", user.key);
+    router.push(`${pathname}?${params.toString()}`, { scroll: false });
+  }
+
+  function close() {
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("user");
+    const qs = params.toString();
+    router.push(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }
 
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();
-    if (!term) return rows;
-    return rows.filter((r) => {
-      if (String(r.__name).toLowerCase().includes(term)) return true;
+    if (!term) return users;
+    return users.filter((u) => {
+      if (u.name.toLowerCase().includes(term)) return true;
+      if (u.email.toLowerCase().includes(term)) return true;
+      if (u.servers.some((s) => s.name.toLowerCase().includes(term))) return true;
       for (const c of columns) {
-        const v = r[c.key];
+        const v = u.fields[c.key];
         if (v != null && String(v).toLowerCase().includes(term)) return true;
       }
       return false;
     });
-  }, [q, rows, columns]);
+  }, [q, users, columns]);
 
-  const shown = filtered.slice(0, limit);
+  const sorted = useMemo(
+    () => [...filtered].sort((a, b) => compareUsers(a, b, sort)),
+    [filtered, sort],
+  );
+
+  const totalPages = Math.max(1, Math.ceil(sorted.length / PER_PAGE));
+  const current = Math.min(page, totalPages);
+  const from = sorted.length ? (current - 1) * PER_PAGE : 0;
+  const shown = sorted.slice(from, from + PER_PAGE);
+
+  function toggleSort(key: string) {
+    setSort((s) =>
+      s.key === key
+        ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: "asc" },
+    );
+    setPage(1);
+  }
+
+  function SortHeader({
+    sortKey,
+    label,
+    className,
+    kind,
+  }: {
+    sortKey: string;
+    label: string;
+    className?: string;
+    kind?: string;
+  }) {
+    const active = sort.key === sortKey;
+    return (
+      <th
+        className={`sortable${active ? " sorted" : ""}${className ? ` ${className}` : ""}`}
+        data-kind={kind}
+        aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}
+        onClick={() => toggleSort(sortKey)}
+      >
+        {label}
+        <span className="sort-arrow">{active ? (sort.dir === "asc" ? "▲" : "▼") : ""}</span>
+      </th>
+    );
+  }
 
   return (
     <>
@@ -188,19 +339,27 @@ export default function SlackUsersTable({
         <input
           type="search"
           className="slack-search"
-          placeholder="Search users…"
+          placeholder="Search users, servers…"
           value={q}
           onChange={(e) => {
             setQ(e.target.value);
-            setLimit(PAGE);
+            setPage(1);
           }}
         />
         <span className="result-meta">
-          {filtered.length.toLocaleString()}
-          {filtered.length !== rows.length
-            ? ` of ${rows.length.toLocaleString()}`
-            : ""}{" "}
-          users
+          {sorted.length > 0 ? (
+            <>
+              Showing <b>{(from + 1).toLocaleString()}</b>–
+              <b>{Math.min(from + PER_PAGE, sorted.length).toLocaleString()}</b>{" "}
+              of <b>{sorted.length.toLocaleString()}</b>
+              {sorted.length !== users.length
+                ? ` (of ${users.length.toLocaleString()})`
+                : ""}{" "}
+              users
+            </>
+          ) : (
+            "0 users"
+          )}
         </span>
       </div>
 
@@ -213,36 +372,46 @@ export default function SlackUsersTable({
           <table className="contact-table slack-table">
             <thead>
               <tr>
-                <th className="col-contact">User</th>
+                <SortHeader sortKey="__name" label="User" className="col-contact" />
+                <SortHeader sortKey="__freq" label="Servers" className="col-servers" />
                 {columns.map((c) => (
-                  <th key={c.key} data-kind={c.kind}>
-                    {c.label}
-                  </th>
+                  <SortHeader
+                    key={c.key}
+                    sortKey={c.key}
+                    label={c.label}
+                    kind={c.kind}
+                  />
                 ))}
               </tr>
             </thead>
             <tbody>
-              {shown.map((r, i) => (
+              {shown.map((u) => (
                 <tr
-                  key={(r.id as string) ?? i}
+                  key={u.key}
                   className="slack-row"
-                  onClick={() => setSelected(r)}
+                  onClick={() => open(u)}
                   tabIndex={0}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      setSelected(r);
+                      open(u);
                     }
                   }}
                 >
                   <td className="col-contact">
                     <div className="who">
-                      <div className="name">{String(r.__name)}</div>
+                      <div className="name">{u.name}</div>
+                      <ServerChips user={u} />
                     </div>
+                  </td>
+                  <td className="col-servers">
+                    <span className="freq-badge" title={u.servers.map((s) => s.name).join(", ")}>
+                      {u.freq}
+                    </span>
                   </td>
                   {columns.map((c) => (
                     <td key={c.key} data-kind={c.kind}>
-                      <Cell col={c} value={r[c.key]} />
+                      <Cell col={c} value={u.fields[c.key]} />
                     </td>
                   ))}
                 </tr>
@@ -252,19 +421,49 @@ export default function SlackUsersTable({
         </div>
       )}
 
-      {limit < filtered.length && (
-        <div className="slack-more">
-          <button className="tab" onClick={() => setLimit((n) => n + PAGE)}>
-            Show more ({(filtered.length - limit).toLocaleString()} remaining)
+      {totalPages > 1 && (
+        <nav className="pager" aria-label="Pagination">
+          <button
+            className={`page-btn${current <= 1 ? " disabled" : ""}`}
+            onClick={() => setPage(current - 1)}
+            disabled={current <= 1}
+            aria-label="Previous page"
+          >
+            ‹
           </button>
-        </div>
+          {buildPages(current, totalPages).map((p, i) =>
+            p === "…" ? (
+              <span key={`gap-${i}`} className="gap">
+                …
+              </span>
+            ) : (
+              <button
+                key={p}
+                className={`page-btn${p === current ? " active" : ""}`}
+                onClick={() => setPage(p)}
+                aria-current={p === current ? "page" : undefined}
+              >
+                {p}
+              </button>
+            ),
+          )}
+          <button
+            className={`page-btn${current >= totalPages ? " disabled" : ""}`}
+            onClick={() => setPage(current + 1)}
+            disabled={current >= totalPages}
+            aria-label="Next page"
+          >
+            ›
+          </button>
+        </nav>
       )}
 
       {selected && (
         <DetailPanel
-          row={selected}
+          user={selected}
           columns={columns}
-          onClose={() => setSelected(null)}
+          initialServer={view === "all" ? undefined : view}
+          onClose={close}
         />
       )}
     </>

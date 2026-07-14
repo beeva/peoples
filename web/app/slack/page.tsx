@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { listWorkspaces, loadWorkspace } from "@/lib/slack";
+import { countAllUsers, listWorkspaces, loadView } from "@/lib/slack";
 import SlackUsersTable from "@/components/SlackUsersTable";
 import ThemeToggle from "@/components/ThemeToggle";
 
@@ -15,12 +15,22 @@ export default async function SlackPage({
   searchParams: SearchParams;
 }) {
   const sp = await searchParams;
-  const workspaces = await listWorkspaces();
+  const [workspaces, allCount] = await Promise.all([
+    listWorkspaces(),
+    countAllUsers(),
+  ]);
 
-  const requested = first(sp.ws);
-  const active =
-    workspaces.find((w) => w.slug === requested) ?? workspaces[0] ?? null;
-  const data = active ? await loadWorkspace(active.slug) : null;
+  const requested = first(sp.ws) || "all";
+  const view =
+    requested === "all" || workspaces.some((w) => w.slug === requested)
+      ? requested
+      : "all";
+  const data = await loadView(view);
+
+  const tabs = [
+    { slug: "all", name: "All Users", count: allCount },
+    ...workspaces.map((w) => ({ slug: w.slug, name: w.name, count: w.count })),
+  ];
 
   return (
     <>
@@ -44,8 +54,10 @@ export default async function SlackPage({
             <div>
               <h1>Slack Users</h1>
               <p>
-                {active
-                  ? `${active.name} — ${active.count.toLocaleString()} members`
+                {data
+                  ? `${data.name} — ${data.count.toLocaleString()} ${
+                      view === "all" ? "unique people" : "members"
+                    }`
                   : "No workspace exports found"}
               </p>
             </div>
@@ -69,23 +81,27 @@ export default async function SlackPage({
         ) : (
           <>
             <div className="tabs" role="tablist" aria-label="Slack workspace">
-              {workspaces.map((w) => (
+              {tabs.map((t) => (
                 <Link
-                  key={w.slug}
+                  key={t.slug}
                   role="tab"
-                  aria-selected={w.slug === active?.slug}
-                  href={`/slack?ws=${encodeURIComponent(w.slug)}`}
-                  className={`tab${w.slug === active?.slug ? " active" : ""}`}
+                  aria-selected={t.slug === view}
+                  href={`/slack?ws=${encodeURIComponent(t.slug)}`}
+                  className={`tab${t.slug === view ? " active" : ""}`}
                   scroll={false}
                 >
-                  {w.name}
-                  <span className="tab-count">{w.count.toLocaleString()}</span>
+                  {t.name}
+                  <span className="tab-count">{t.count.toLocaleString()}</span>
                 </Link>
               ))}
             </div>
 
             {data && (
-              <SlackUsersTable columns={data.columns} rows={data.rows} />
+              <SlackUsersTable
+                columns={data.columns}
+                users={data.users}
+                view={view}
+              />
             )}
           </>
         )}

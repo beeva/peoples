@@ -33,6 +33,8 @@ export interface EmailRecord {
   messagedCount: number;
   messagedAt: string;
   messagedTo: string;
+  /** True when the sent flag was set by hand, not by an actual send. */
+  messagedManual: boolean;
 }
 
 export interface Stats {
@@ -132,6 +134,7 @@ interface RawItem {
   messaged_count?: number;
   messaged_at?: string;
   messaged_to?: string;
+  messaged_manual?: boolean;
 }
 
 interface RawStats {
@@ -195,6 +198,7 @@ function mapItem(it: RawItem, idx: number): EmailRecord {
     messagedCount: it.messaged_count ?? 0,
     messagedAt: it.messaged_at ?? "",
     messagedTo: it.messaged_to ?? "",
+    messagedManual: Boolean(it.messaged_manual),
   };
 }
 

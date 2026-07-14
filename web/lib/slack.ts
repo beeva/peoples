@@ -22,12 +22,36 @@ export interface Column {
   kind: "avatar" | "email" | "bool" | "date" | "id" | "text";
 }
 
-export interface WorkspaceData {
+type Row = Record<string, unknown>;
+
+export interface ServerRef {
   slug: string;
   name: string;
-  url: string;
+}
+
+/** One user's full flattened record within a single workspace. */
+export interface ServerData extends ServerRef {
+  fields: Row;
+}
+
+/** A person, deduplicated across servers by email. */
+export interface DisplayUser {
+  key: string; // email (lowercased) or slug:id fallback
+  name: string;
+  email: string;
+  avatar: string;
+  freq: number; // how many servers they appear in
+  servers: ServerRef[]; // every server they belong to
+  serverData: ServerData[]; // per-server flattened records (for detail tabs)
+  fields: Row; // representative record used for table columns
+}
+
+export interface ViewData {
+  view: string; // "all" or a workspace slug
+  name: string;
+  count: number;
   columns: Column[];
-  rows: Record<string, unknown>[];
+  users: DisplayUser[];
 }
 
 type Json = Record<string, unknown>;
@@ -54,19 +78,22 @@ const DENY_LEAVES = new Set([
   "skype",
 ]);
 
+// Full keys that duplicate another column (top-level wins).
+const DENY_KEYS = new Set(["profile.real_name"]);
+
 // Preferred column order; anything else is appended alphabetically.
 const PRIORITY = [
   "name",
   "real_name",
   "profile.email",
-  "profile.title",
+  "tz_label",
+  "tz",
   "profile.phone",
+  "profile.title",
   "profile.display_name",
   "profile.first_name",
   "profile.last_name",
   "profile.status_text",
-  "tz_label",
-  "tz",
   "is_admin",
   "is_owner",
   "is_primary_owner",
@@ -77,9 +104,6 @@ const PRIORITY = [
   "updated",
   "id",
 ];
-
-// Full keys that duplicate another column (top-level wins).
-const DENY_KEYS = new Set(["profile.real_name"]);
 
 function isDenied(key: string): boolean {
   if (DENY_KEYS.has(key)) return true;
@@ -114,8 +138,8 @@ function kindFor(key: string): Column["kind"] {
 }
 
 /** Flatten one Slack user into { key -> scalar } plus avatar/display helpers. */
-function flattenUser(u: Json): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+function flattenUser(u: Json): Row {
+  const out: Row = {};
   for (const [k, v] of Object.entries(u)) {
     if (k === "profile" || k === "workspace") continue;
     if (isScalar(v) && !isDenied(k)) out[k] = v;
@@ -125,7 +149,6 @@ function flattenUser(u: Json): Record<string, unknown> {
     const key = `profile.${k}`;
     if (isScalar(v) && !isDenied(key)) out[key] = v;
   }
-  // Avatar + display name are rendered specially, kept off the column list.
   out.__avatar =
     profile.image_192 ||
     profile.image_512 ||
@@ -170,47 +193,110 @@ export const listWorkspaces = cache(async (): Promise<WorkspaceInfo[]> => {
   return infos;
 });
 
-/** Load one workspace: derive columns from its JSON and flatten every user. */
-export async function loadWorkspace(
-  slug: string,
-): Promise<WorkspaceData | null> {
-  const all = await listWorkspaces();
-  const info = all.find((w) => w.slug === slug);
-  if (!info) return null;
+/** Read every workspace and group users across servers by email. */
+const buildIndex = cache(
+  async (): Promise<{
+    workspaces: WorkspaceInfo[];
+    byKey: Map<string, ServerData[]>;
+  }> => {
+    const workspaces = await listWorkspaces();
+    const byKey = new Map<string, ServerData[]>();
+    for (const w of workspaces) {
+      const users = await readJson(w.file);
+      for (const u of users) {
+        const fields = flattenUser(u);
+        const email = String(fields["profile.email"] || "").toLowerCase();
+        const key = email || `${w.slug}:${fields.id ?? ""}`;
+        const entry: ServerData = { slug: w.slug, name: w.name, fields };
+        const arr = byKey.get(key);
+        if (arr) arr.push(entry);
+        else byKey.set(key, [entry]);
+      }
+    }
+    return { workspaces, byKey };
+  },
+);
 
-  const users = await readJson(info.file);
-  const rows = users.map(flattenUser);
-  const ws = (users[0]?.workspace ?? {}) as Json;
+/** Total number of unique people across all servers. */
+export const countAllUsers = cache(async (): Promise<number> => {
+  return (await buildIndex()).byKey.size;
+});
 
-  // Candidate columns = every key that has a non-empty value on some row.
+/** Build one deduplicated person, preferring `primarySlug`'s record for display. */
+function toDisplayUser(
+  key: string,
+  entries: ServerData[],
+  primarySlug?: string,
+): DisplayUser {
+  const serverData = [...entries].sort((a, b) => a.name.localeCompare(b.name));
+  const primary =
+    (primarySlug && serverData.find((e) => e.slug === primarySlug)) ||
+    serverData[0];
+  const f = primary.fields;
+  const avatar =
+    String(f.__avatar || "") ||
+    String(serverData.find((e) => e.fields.__avatar)?.fields.__avatar || "");
+  return {
+    key,
+    name: String(f.__name || "?"),
+    email: String(f["profile.email"] || ""),
+    avatar,
+    freq: serverData.length,
+    servers: serverData.map((e) => ({ slug: e.slug, name: e.name })),
+    serverData,
+    fields: f,
+  };
+}
+
+/** Derive the column set from the fields actually present on the given records. */
+function deriveColumns(records: Row[]): Column[] {
   const nonEmpty = new Set<string>();
-  for (const row of rows) {
+  for (const row of records) {
     for (const [k, v] of Object.entries(row)) {
       if (k.startsWith("__")) continue;
       if (v === "" || v === null || v === undefined) continue;
       nonEmpty.add(k);
     }
   }
-
   const ordered = [
     ...PRIORITY.filter((k) => nonEmpty.has(k)),
     ...[...nonEmpty].filter((k) => !PRIORITY.includes(k)).sort(),
   ];
-
-  const columns: Column[] = ordered.map((key) => ({
+  return ordered.map((key) => ({
     key,
     label: labelFor(key),
-    // Booleans are detected from the data so we can render check/blank cells.
-    kind: rows.some((r) => typeof r[key] === "boolean")
+    kind: records.some((r) => typeof r[key] === "boolean")
       ? "bool"
       : kindFor(key),
   }));
+}
+
+/**
+ * Load a view: "all" for the deduplicated cross-server directory, or a
+ * workspace slug for that server's members (still annotated with every server
+ * each person belongs to).
+ */
+export async function loadView(view: string): Promise<ViewData | null> {
+  const { workspaces, byKey } = await buildIndex();
+  const isAll = view === "all";
+  const ws = isAll ? null : workspaces.find((w) => w.slug === view);
+  if (!isAll && !ws) return null;
+
+  const users: DisplayUser[] = [];
+  for (const [key, entries] of byKey) {
+    if (isAll) {
+      users.push(toDisplayUser(key, entries));
+    } else if (entries.some((e) => e.slug === view)) {
+      users.push(toDisplayUser(key, entries, view));
+    }
+  }
+  users.sort((a, b) => a.name.localeCompare(b.name));
 
   return {
-    slug: info.slug,
-    name: info.name,
-    url: (ws.url as string) || "",
-    columns,
-    rows,
+    view,
+    name: isAll ? "All Users" : ws!.name,
+    count: users.length,
+    columns: deriveColumns(users.map((u) => u.fields)),
+    users,
   };
 }

@@ -4,6 +4,7 @@ import { highlight } from "@/lib/highlight";
 import { countryDisplay, genderDisplay, sentLabel } from "@/lib/display";
 import CopyButton from "./CopyButton";
 import MessageButton from "./MessageButton";
+import SentToggle from "./SentToggle";
 
 const AVATAR_COLORS: [string, string][] = [
   ["#6ea8fe", "#3b6fd4"],
@@ -51,6 +52,10 @@ function Row({ record, query }: { record: EmailRecord; query: string }) {
 
   return (
     <tr className={record.messaged ? "messaged" : undefined}>
+      <td className="col-check">
+        <SentToggle id={record.id} name={display} sent={record.messaged} />
+      </td>
+
       <td className="col-contact">
         <Link href={href} className="row-contact">
           <div className="avatar sm" style={{ background: avatarGradient(display) }}>
@@ -130,7 +135,8 @@ function Row({ record, query }: { record: EmailRecord; query: string }) {
         {record.messaged ? (
           <span
             className="sent-badge"
-            title={sentLabel(record.messagedAt, record.messagedCount)}
+            data-manual={record.messagedManual || undefined}
+            title={sentLabel(record.messagedAt, record.messagedCount, record.messagedManual)}
           >
             ✓ Sent
           </span>
@@ -173,6 +179,9 @@ export default function EmailTable({
       <table className="contact-table">
         <thead>
           <tr>
+            <th className="col-check">
+              <span className="sr-only">Sent</span>
+            </th>
             <th className="col-contact">Contact</th>
             <th className="col-gender">Gender</th>
             <th className="col-source">Source</th>

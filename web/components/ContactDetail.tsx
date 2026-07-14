@@ -2,6 +2,7 @@ import type { EmailDetail, SourceKey } from "@/lib/emails";
 import { countryDisplay, genderDisplay, sentLabel } from "@/lib/display";
 import CopyButton from "./CopyButton";
 import MessageButton from "./MessageButton";
+import SentToggle from "./SentToggle";
 
 const SOURCE_LABELS: Record<string, string> = {
   discourse: "three.js",
@@ -72,13 +73,23 @@ export default function ContactDetail({ record }: { record: EmailDetail }) {
           </div>
         </div>
         {record.messaged && (
-          <span className="sent-badge" title={sentLabel(record.messagedAt, record.messagedCount)}>
-            ✓ {sentLabel(record.messagedAt, record.messagedCount)}
+          <span
+            className="sent-badge"
+            data-manual={record.messagedManual || undefined}
+            title={sentLabel(record.messagedAt, record.messagedCount, record.messagedManual)}
+          >
+            ✓ {sentLabel(record.messagedAt, record.messagedCount, record.messagedManual)}
           </span>
         )}
         <span className="src-badge" data-source={src}>
           {SOURCE_LABELS[src] ?? src}
         </span>
+        <SentToggle
+          id={record.id}
+          name={display}
+          sent={record.messaged}
+          variant="labeled"
+        />
         {primaryEmail && (
           <MessageButton id={record.id} to={primaryEmail} name={display} variant="primary" />
         )}
