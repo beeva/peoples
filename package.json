@@ -12,10 +12,10 @@
     "start": "concurrently -k -n server,web -c blue,magenta \"npm:start:server\" \"npm:start:web\"",
     "start:server": "python server.py",
     "start:web": "npm --prefix web run start",
-    "kill": "node scripts/kill-port.js 8000 3000",
+    "kill": "node scripts/kill-port.js 8000 3090",
     "kill:server": "node scripts/kill-port.js 8000",
-    "kill:web": "node scripts/kill-port.js 3000",
-    "restart": "node scripts/kill-port.js 8000 3000 && npm run dev"
+    "kill:web": "node scripts/kill-port.js 3090",
+    "restart": "node scripts/kill-port.js 8000 3090 && npm run dev"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

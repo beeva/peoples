@@ -1,5 +1,12 @@
 import type { EmailDetail, SourceKey } from "@/lib/emails";
-import { countryDisplay, genderDisplay, sentLabel } from "@/lib/display";
+import {
+  accountAge,
+  countryDisplay,
+  genderDisplay,
+  joinedDisplay,
+  joinedLabel,
+  sentLabel,
+} from "@/lib/display";
 import CopyButton from "./CopyButton";
 import MessageButton from "./MessageButton";
 import SentToggle from "./SentToggle";
@@ -7,6 +14,7 @@ import SentToggle from "./SentToggle";
 const SOURCE_LABELS: Record<string, string> = {
   discourse: "three.js",
   aboutme: "about.me",
+  github: "GitHub",
 };
 
 function avatarGradient(seed: string): string {
@@ -53,11 +61,22 @@ export default function ContactDetail({ record }: { record: EmailDetail }) {
   const posts = record.postsFull;
   const country = countryDisplay(record.country, record.countryCode);
   const gender = genderDisplay(record.gender);
+  // A GitHub contact's `url` is their profile and `siteUrl` their portfolio --
+  // both worth surfacing as labelled links. Other sources put a post/topic URL
+  // in `url`, which is already shown per-post below, so we don't repeat it here.
+  const isGithub = SOURCE_LABELS[src] === "GitHub";
   const extLinks = [
+    ...(isGithub && record.url ? [{ url: record.url, label: "GitHub profile" }] : []),
+    ...(record.siteUrl ? [{ url: record.siteUrl, label: `Portfolio · ${hostOf(record.siteUrl)}` }] : []),
     ...record.applyLinks.map((url) => ({ url, label: `Apply · ${hostOf(url)}` })),
     ...record.messaging.map((url) => ({ url, label: `Message · ${hostOf(url)}` })),
     ...record.links.map((url) => ({ url, label: hostOf(url) })),
   ];
+  const activeDate = formatDate(record.activityAt);
+  // `createdAt` is only a *join* date for GitHub; for a post-based source it is
+  // when that post was written, which is not the same claim at all.
+  const joined = isGithub ? joinedDisplay(record.createdAt) : "";
+  const age = isGithub ? accountAge(record.createdAt) : "";
 
   return (
     <>
@@ -95,7 +114,7 @@ export default function ContactDetail({ record }: { record: EmailDetail }) {
         )}
       </header>
 
-      {(record.organization || record.location || country || gender) && (
+      {(record.organization || record.location || country || gender || activeDate || joined) && (
         <div className="card-meta">
           {record.organization && <span className="meta-bit">🏢 {record.organization}</span>}
           {country && <span className="meta-bit">{country}</span>}
@@ -105,6 +124,13 @@ export default function ContactDetail({ record }: { record: EmailDetail }) {
             </span>
           )}
           {record.location && <span className="meta-bit">📍 {record.location}</span>}
+          {activeDate && <span className="meta-bit">🕒 Last active {activeDate}</span>}
+          {joined && (
+            <span className="meta-bit" title={joinedLabel(record.createdAt)}>
+              🎂 Joined {joined}
+              {age && <span className="age-badge">{age}</span>}
+            </span>
+          )}
         </div>
       )}
 

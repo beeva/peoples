@@ -73,8 +73,26 @@ export default function SearchControls({
         onChange={(e) => pushParams({ sort: e.target.value })}
         aria-label="Sort order"
       >
-        <option value="newest">Newest first</option>
-        <option value="oldest">Oldest first</option>
+        <optgroup label="Date">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+        </optgroup>
+        <optgroup label="Scrape run">
+          <option value="run_desc">Step — latest run first</option>
+          <option value="run_asc">Step — first run first</option>
+        </optgroup>
+        <optgroup label="Name">
+          <option value="name_asc">Name A–Z</option>
+          <option value="name_desc">Name Z–A</option>
+        </optgroup>
+        <optgroup label="Email">
+          <option value="email_asc">Email A–Z</option>
+          <option value="email_desc">Email Z–A</option>
+        </optgroup>
+        <optgroup label="Country">
+          <option value="country_asc">Country A–Z</option>
+          <option value="country_desc">Country Z–A</option>
+        </optgroup>
       </select>
     </div>
   );

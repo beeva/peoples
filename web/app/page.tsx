@@ -1,8 +1,13 @@
 import Link from "next/link";
 import {
+  ageActive,
+  DEFAULT_SORT,
   fetchEmails,
+  isSortKey,
+  parseFilter,
   parseMessaged,
   PER_PAGE,
+  type SortKey,
   type SourceKey,
 } from "@/lib/emails";
 import EmailTable from "@/components/EmailTable";
@@ -10,13 +15,15 @@ import Pagination from "@/components/Pagination";
 import SearchControls from "@/components/SearchControls";
 import CategoryTabs from "@/components/CategoryTabs";
 import StatusFilter from "@/components/StatusFilter";
+import FacetFilters from "@/components/FacetFilters";
 import RescrapeButton from "@/components/RescrapeButton";
+import ExportButton from "@/components/ExportButton";
 import ThemeToggle from "@/components/ThemeToggle";
 import Toaster from "@/components/Toaster";
 
 type SearchParams = Promise<{ [key: string]: string | string[] | undefined }>;
 
-const VALID_SOURCES = new Set(["all", "discourse", "aboutme"]);
+const VALID_SOURCES = new Set(["all", "discourse", "aboutme", "github"]);
 
 function first(v: string | string[] | undefined): string {
   return Array.isArray(v) ? (v[0] ?? "") : (v ?? "");
@@ -38,13 +45,17 @@ export default async function Home({
 }) {
   const sp = await searchParams;
   const q = first(sp.q);
-  const sort = first(sp.sort) === "oldest" ? "oldest" : "newest";
+  const sortParam = first(sp.sort);
+  const sort: SortKey = isSortKey(sortParam) ? sortParam : DEFAULT_SORT;
   const page = Math.max(1, parseInt(first(sp.page) || "1", 10) || 1);
   const sourceParam = first(sp.source);
   const source: SourceKey = VALID_SOURCES.has(sourceParam) ? sourceParam : "all";
   const messaged = parseMessaged(first(sp.messaged));
+  const filter = parseFilter(sp);
 
-  const result = await fetchEmails(source, q, sort, page, PER_PAGE, messaged);
+  const result = await fetchEmails(
+    source, q, sort, page, PER_PAGE, messaged, filter,
+  );
   const stats = result.stats;
   const noun = stats.noun || "Records";
   const activeSource = result.sources.find((s) => s.key === result.source);
@@ -54,9 +65,16 @@ export default async function Home({
 
   const baseParams: Record<string, string> = {};
   if (q) baseParams.q = q;
-  if (sort !== "newest") baseParams.sort = sort;
+  if (sort !== DEFAULT_SORT) baseParams.sort = sort;
   if (result.source !== "all") baseParams.source = result.source;
   if (result.messaged !== "all") baseParams.messaged = result.messaged;
+  // Keep the active country/gender/age filter in pagination and sort links.
+  if (filter.countries.length) baseParams.country = filter.countries.join(",");
+  if (filter.genders.length) baseParams.gender = filter.genders.join(",");
+  if (ageActive(filter)) {
+    baseParams.age_op = filter.ageOp;
+    baseParams.age = filter.ageValue;
+  }
 
   const range =
     stats.earliest && stats.latest
@@ -111,6 +129,10 @@ export default async function Home({
               label={activeSource.label}
             />
           )}
+          {/* CSV export of main emails -- GitHub first; other sources later. */}
+          {result.source === "github" && activeSource && (
+            <ExportButton source={result.source} label={activeSource.label} />
+          )}
         </div>
 
         <section className="stats">
@@ -131,6 +153,12 @@ export default async function Home({
         <div className="filter-row">
           <StatusFilter active={result.messaged} counts={result.messagedCounts} />
         </div>
+
+        <FacetFilters
+          filter={result.filter}
+          facets={result.facets}
+          showAge={result.source === "github"}
+        />
 
         {result.error && (
           <div className="banner" role="alert">
@@ -166,7 +194,13 @@ export default async function Home({
         </div>
 
         {result.items.length > 0 ? (
-          <EmailTable items={result.items} query={q} />
+          <EmailTable
+            items={result.items}
+            query={q}
+            startIndex={(result.page - 1) * result.perPage}
+            sort={sort}
+            baseParams={baseParams}
+          />
         ) : (
           <div className="empty">
             <svg

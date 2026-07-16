@@ -5,7 +5,7 @@
  * Kill whatever process is LISTENING on the given TCP port(s).
  *
  *   node scripts/kill-port.js 8000          # kill the data server
- *   node scripts/kill-port.js 8000 3000     # data server + web dev server
+ *   node scripts/kill-port.js 8000 3090     # data server + web dev server
  *
  * Cross-platform (Windows / macOS / Linux), no dependencies. Only listeners
  * are targeted, so client connections (e.g. your browser) are left alone.

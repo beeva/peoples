@@ -1,6 +1,30 @@
 import "server-only";
+import {
+  ageToRange,
+  EMPTY_FILTER,
+  type FacetFilter,
+  type Facets,
+} from "./filters";
 
-export type SourceKey = "all" | "discourse" | "devto" | "aboutme" | string;
+// Re-export the filter model so server-side callers can keep importing it from
+// "@/lib/emails"; the client imports it straight from "@/lib/filters" (which has
+// no server-only guard).
+export type { AgeOp, CountryFacet, FacetFilter, Facets } from "./filters";
+export {
+  ageActive,
+  ageToRange,
+  EMPTY_FILTER,
+  hasActiveFilter,
+  parseFilter,
+} from "./filters";
+
+export type SourceKey =
+  | "all"
+  | "discourse"
+  | "devto"
+  | "aboutme"
+  | "github"
+  | string;
 
 export interface PostRef {
   title: string;
@@ -16,7 +40,13 @@ export interface EmailRecord {
   username: string;
   title: string;
   url: string;
+  /** The person's own site (GitHub `blog`), distinct from the profile `url`. */
+  siteUrl: string;
   createdAt: string;
+  /** Last time the contact was publicly active at the source ("" if unknown). */
+  activityAt: string;
+  /** Which scrape run collected this contact (0 = the source doesn't number runs). */
+  run: number;
   preview: string;
   tags: string[];
   location: string;
@@ -83,6 +113,8 @@ export interface QueryResult {
   source: SourceKey;
   messaged: MessagedFilter;
   messagedCounts: MessagedCounts;
+  filter: FacetFilter;
+  facets: Facets;
   stats: Stats;
   sources: SourceInfo[];
   error: string | null;
@@ -117,7 +149,10 @@ interface RawItem {
   username?: string;
   title?: string;
   url?: string;
+  site_url?: string;
   created_at?: string;
+  activity_at?: string;
+  run?: number;
   preview?: string;
   tags?: string[];
   location?: string;
@@ -162,6 +197,15 @@ interface RawResponse {
   source?: string;
   messaged?: string;
   messaged_counts?: { all?: number; sent?: number; unsent?: number };
+  country?: string;
+  gender?: string;
+  age_min?: string;
+  age_max?: string;
+  facets?: {
+    countries?: { name?: string; code?: string; count?: number }[];
+    genders?: { male?: number; female?: number; unknown?: number };
+    ages?: Record<string, number>;
+  };
   stats?: RawStats;
   sources?: RawSource[];
 }
@@ -175,7 +219,10 @@ function mapItem(it: RawItem, idx: number): EmailRecord {
     username: (it.username ?? "").trim(),
     title: it.title ?? "",
     url: it.url ?? "",
+    siteUrl: it.site_url ?? "",
     createdAt: it.created_at ?? "",
+    activityAt: it.activity_at ?? "",
+    run: Number(it.run) || 0,
     preview: it.preview ?? "",
     tags: Array.isArray(it.tags) ? it.tags : [],
     location: it.location ?? "",
@@ -224,14 +271,38 @@ function mapSources(list: RawSource[] | undefined): SourceInfo[] {
   }));
 }
 
+/** Every column the table can be ordered by, and which way. Mirrors `SORTS` in
+ *  server.py; "newest"/"oldest" keep their old names so existing links work. */
+export const SORT_KEYS = [
+  "newest",
+  "oldest",
+  "run_desc",
+  "run_asc",
+  "name_asc",
+  "name_desc",
+  "email_asc",
+  "email_desc",
+  "country_asc",
+  "country_desc",
+] as const;
+
+export type SortKey = (typeof SORT_KEYS)[number];
+
+export const DEFAULT_SORT: SortKey = "newest";
+
+export function isSortKey(value: string | undefined): value is SortKey {
+  return !!value && (SORT_KEYS as readonly string[]).includes(value);
+}
+
 /** Fetch a page of records from the Python data server. */
 export async function fetchEmails(
   source: SourceKey,
   q: string,
-  sort: "newest" | "oldest",
+  sort: SortKey,
   page: number,
   perPage: number = PER_PAGE,
   messaged: MessagedFilter = "all",
+  filter: FacetFilter = EMPTY_FILTER,
 ): Promise<QueryResult> {
   const params = new URLSearchParams({
     source,
@@ -241,6 +312,11 @@ export async function fetchEmails(
   });
   if (q) params.set("q", q);
   if (messaged !== "all") params.set("messaged", messaged);
+  if (filter.countries.length) params.set("country", filter.countries.join(","));
+  if (filter.genders.length) params.set("gender", filter.genders.join(","));
+  const { min, max } = ageToRange(filter);
+  if (min) params.set("age_min", min);
+  if (max) params.set("age_max", max);
 
   const url = `${API_BASE_URL}/api/emails?${params.toString()}`;
 
@@ -263,6 +339,11 @@ export async function fetchEmails(
         sent: data.messaged_counts?.sent ?? 0,
         unsent: data.messaged_counts?.unsent ?? 0,
       },
+      // Echo the selection the caller asked for -- the server round-trips
+      // country/gender but not the age *operator* (it only knows min/max), so
+      // the client filter is the source of truth for the age comparison.
+      filter,
+      facets: mapFacets(data.facets),
       stats: mapStats(data.stats),
       sources: mapSources(data.sources),
       error: null,
@@ -278,11 +359,37 @@ export async function fetchEmails(
       source,
       messaged,
       messagedCounts: { all: 0, sent: 0, unsent: 0 },
+      filter,
+      facets: EMPTY_FACETS,
       stats: EMPTY_STATS,
       sources: FALLBACK_SOURCES,
       error: `Could not reach the data server at ${API_BASE_URL} (${message}).`,
     };
   }
+}
+
+const EMPTY_FACETS: Facets = {
+  countries: [],
+  genders: { male: 0, female: 0, unknown: 0 },
+  ages: {},
+};
+
+function mapFacets(f: RawResponse["facets"]): Facets {
+  return {
+    countries: (f?.countries ?? [])
+      .map((c) => ({
+        name: (c.name ?? "").trim(),
+        code: (c.code ?? "").trim(),
+        count: c.count ?? 0,
+      }))
+      .filter((c) => c.name),
+    genders: {
+      male: f?.genders?.male ?? 0,
+      female: f?.genders?.female ?? 0,
+      unknown: f?.genders?.unknown ?? 0,
+    },
+    ages: f?.ages ?? {},
+  };
 }
 
 // ---- Single-contact detail (all posts, full text) ----

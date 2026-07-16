@@ -1,9 +1,18 @@
 import type { Metadata } from "next";
+import { Inter } from "next/font/google";
 import "./globals.css";
 
+// Inter with tabular numerals — the workhorse UI face; the `--font-sans`
+// variable is consumed by `body` in globals.css, with a system fallback.
+const inter = Inter({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-sans",
+});
+
 export const metadata: Metadata = {
-  title: "three.js Email Directory",
-  description: "Browse contacts scraped from the three.js discourse forum.",
+  title: "Contact Directory",
+  description: "Browse and reach the contacts your scrapers have found.",
 };
 
 // Set the theme before paint to avoid a flash of the wrong theme.
@@ -26,7 +35,7 @@ export default function RootLayout({
   modal: React.ReactNode;
 }) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" className={inter.variable} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>

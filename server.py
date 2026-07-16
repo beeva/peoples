@@ -9,6 +9,7 @@ email, and **on-demand incremental re-scraping** of each source:
     * discourse  -> scrapers/discourse/threejs/threejs_emails.jsonl
     * devto      -> scrapers/devto/jobs.json
     * aboutme    -> scrapers/aboutme/users.jsonl
+    * github     -> scrapers/github/users.jsonl
 
 Each source is normalised into one common record shape (with a `source` tag).
 A re-scrape runs the source's scraper as a background subprocess; every scraper
@@ -29,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from collections import deque
@@ -41,6 +43,13 @@ from urllib.parse import urlparse, parse_qs
 
 BASE_DIR = Path(__file__).resolve().parent
 SCRAPERS_DIR = BASE_DIR / "scrapers"
+
+# The scrapers decide which of a person's addresses is the one to write to; the
+# API reads that same rule rather than keeping a second opinion. Applying it on
+# load also means records scraped before the rule existed are ordered correctly
+# without re-scraping them.
+sys.path.insert(0, str(SCRAPERS_DIR))
+from common import personal_first  # noqa: E402
 STATE_FILE = SCRAPERS_DIR / "state.json"
 MAX_PER_PAGE = 100
 
@@ -115,11 +124,14 @@ SENT_LOG: dict = {}          # recipient email -> {"count","last_sent","last_sub
 DISCOURSE_FILE = SCRAPERS_DIR / "discourse" / "threejs" / "threejs_emails.jsonl"
 DEVTO_FILE = SCRAPERS_DIR / "devto" / "jobs.json"
 ABOUTME_FILE = SCRAPERS_DIR / "aboutme" / "users.jsonl"
+GITHUB_FILE = SCRAPERS_DIR / "github" / "users.jsonl"
 
 # Per-source resume cursors written by the scrapers (git-ignored runtime state).
 DISCOURSE_CURSOR = SCRAPERS_DIR / "discourse" / "threejs" / ".cursor"
 ABOUTME_CURSOR = SCRAPERS_DIR / "aboutme" / ".cursor"
-CURSOR_FILES = {"discourse": DISCOURSE_CURSOR, "aboutme": ABOUTME_CURSOR}
+GITHUB_CURSOR = SCRAPERS_DIR / "github" / ".cursor"
+CURSOR_FILES = {"discourse": DISCOURSE_CURSOR, "aboutme": ABOUTME_CURSOR,
+                "github": GITHUB_CURSOR}
 
 # Strip HTML tags to build a clean text preview / searchable blob.
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -227,7 +239,8 @@ def _norm_links(links) -> list[str]:
 def _record(source, local_id, *, emails, name="", username="", title="",
             url="", created_at="", preview="", tags=None, location="",
             organization="", apply_links=None, messaging=None, links=None,
-            search_extra="", full=""):
+            search_extra="", full="", site_url="", activity_at="", run=0,
+            country="", country_code="", gender=""):
     emails = [e.lower() for e in (emails or []) if e]
     seen, uniq = set(), []
     for e in emails:
@@ -242,7 +255,21 @@ def _record(source, local_id, *, emails, name="", username="", title="",
         "username": (username or "").strip(),
         "title": (title or "").strip(),
         "url": url or "",
+        # The person's own site (a GitHub profile's `blog`), as opposed to the
+        # profile page itself -- worth its own field so the UI can label it.
+        "site_url": site_url or "",
         "created_at": created_at or "",
+        # When the contact was last seen active at the source ("" if unknown).
+        "activity_at": activity_at or "",
+        # Which scrape run collected this contact (0 = the source does not
+        # number its runs). Lets the UI show what a given run brought in.
+        "run": run or 0,
+        # Country/gender the *scraper* determined (GitHub: from location, and
+        # gender only when a --gender scrape ran). A fallback for the merge when
+        # Claude enrichment has not filled these in yet.
+        "_scraped_country": (country or "").strip(),
+        "_scraped_country_code": (country_code or "").strip().upper()[:2],
+        "_scraped_gender": (gender or "").strip().lower(),
         "preview": preview or "",
         "tags": tags or [],
         "location": (location or "").strip(),
@@ -254,7 +281,11 @@ def _record(source, local_id, *, emails, name="", username="", title="",
     # Full, untruncated cleaned text of this single occurrence -- shown on the
     # detail page (the list only needs `preview`). Falls back to the preview.
     rec["_full"] = (full or rec["preview"] or "").strip()
-    rec["_ts"] = _parse_ts(created_at or "")
+    # Sort on the date the UI shows: for a profile that is "last active", for a
+    # post it is when it was written. Keeps the Date column and its sort honest.
+    rec["_ts"] = _parse_ts(activity_at or created_at or "")
+    # The join date on its own, for the account-age filter (0.0 = unknown).
+    rec["_created_ts"] = _parse_ts(created_at or "")
     rec["_blob"] = " ".join([
         " ".join(uniq), rec["name"], rec["username"], rec["title"],
         rec["location"], rec["organization"], " ".join(rec["tags"]),
@@ -325,6 +356,50 @@ def load_aboutme():
     return records
 
 
+def load_github():
+    records = []
+    for i, d in enumerate(_read_jsonl(GITHUB_FILE), 1):
+        login = d.get("login") or str(d.get("user_id") or i)
+        bio = d.get("bio") or ""
+        # Which sources the email came from ("profile", "site", ...) -- worth
+        # surfacing as tags: a profile email is a warmer lead than a commit one.
+        via = list((d.get("email_sources") or {}).keys())
+        twitter = d.get("twitter")
+        # The GitHub profile is `url`; the portfolio site is its own field. Any
+        # Twitter handle rounds out the "links" list shown on the detail card.
+        links = [f"https://twitter.com/{twitter}"] if twitter else []
+        records.append(_record(
+            "github", login,
+            # Personal mailbox first (gmail, proton, ...), then a work address,
+            # then a role desk (support@, info@) -- emails[0] is what the table
+            # shows and what the Message button writes to. Stable, so within a
+            # rank the scraper's own source order (profile > site > commit) holds.
+            emails=personal_first(d.get("emails", [])),
+            name=d.get("full_name") or login,
+            username=login,
+            title=d.get("company") or "",
+            url=d.get("url") or f"https://github.com/{login}",
+            site_url=d.get("site_url") or "",
+            created_at=d.get("created_at", ""),        # the day they joined
+            activity_at=d.get("last_activity", ""),    # last public activity
+            # Users scraped before runs were numbered are, by definition, run 1.
+            run=_to_int(str(d.get("run", "")), 1),
+            country=d.get("country") or "",            # from regions.py classify()
+            country_code=d.get("country_code") or "",
+            gender=d.get("gender") or "",              # set only by a --gender run
+            preview=_preview(bio),
+            full=bio,
+            tags=[t for t in [d.get("country")] if t] + [f"via {v}" for v in via],
+            location=d.get("location") or "",
+            organization=d.get("company") or "",
+            links=links,
+            search_extra=" ".join(filter(None, (
+                d.get("country"), d.get("region"), d.get("site_url"), twitter,
+            ))),
+        ))
+    return records
+
+
 # ---- merge same-email rows ------------------------------------------------
 def _merge_group(group: list[dict]) -> dict:
     """Collapse records that belong to one contact into a single row.
@@ -356,6 +431,10 @@ def _merge_group(group: list[dict]) -> dict:
     rep["username"] = first("username")
     rep["organization"] = first("organization")
     rep["location"] = first("location")
+    rep["site_url"] = first("site_url")
+    # Latest activity across everything merged into this contact.
+    rep["activity_at"] = max((r.get("activity_at") or "" for r in group),
+                             default="")
     rep["tags"] = union("tags")
     rep["apply_links"] = union("apply_links")
     rep["messaging"] = union("messaging")
@@ -377,11 +456,15 @@ def _merge_group(group: list[dict]) -> dict:
     rep["_occurrences"] = len(group)
     rep["_ts"] = max(r["_ts"] for r in group)
     rep["_blob"] = " ".join(r["_blob"] for r in group)
-    # Inferred country/gender (filled from cache; empty until enriched).
+    # Country/gender: Claude enrichment first, then whatever the scraper already
+    # worked out (GitHub knows the country from the location, and the gender too
+    # when a --gender scrape ran). So a scrape-time value shows at once and is
+    # not re-inferred, while enrichment still fills the gaps for other sources.
     enr = _enrichment_for(rep["emails"][0] if rep["emails"] else "")
-    rep["country"] = enr.get("country", "")
-    rep["country_code"] = enr.get("country_code", "")
-    rep["gender"] = enr.get("gender", "")
+    rep["country"] = enr.get("country") or rep.get("_scraped_country") or ""
+    rep["country_code"] = (enr.get("country_code")
+                           or rep.get("_scraped_country_code") or "")
+    rep["gender"] = enr.get("gender") or rep.get("_scraped_gender") or ""
     # Have we emailed this contact? (filled from the persisted sent log.)
     _set_sent_fields(rep)
     return rep
@@ -425,18 +508,80 @@ def _merge_by_email(records: list[dict]) -> list[dict]:
 SOURCES = [
     {"key": "discourse", "label": "three.js forum", "noun": "Posts", "loader": load_discourse},
     {"key": "aboutme", "label": "about.me", "noun": "Profiles", "loader": load_aboutme},
+    {"key": "github", "label": "GitHub", "noun": "Profiles", "loader": load_github},
 ]
 SOURCE_BY_KEY = {s["key"]: s for s in SOURCES}
 NOUNS = {s["key"]: s["noun"] for s in SOURCES}
 NOUNS["all"] = "Records"
 
 PUBLIC_FIELDS = (
-    "id", "source", "emails", "name", "username", "title", "url",
-    "created_at", "preview", "tags", "location", "organization",
-    "apply_links", "messaging", "links", "posts", "post_count",
+    "id", "source", "emails", "name", "username", "title", "url", "site_url",
+    "created_at", "activity_at", "run", "preview", "tags", "location",
+    "organization", "apply_links", "messaging", "links", "posts", "post_count",
     "country", "country_code", "gender",
     "messaged", "messaged_count", "messaged_at", "messaged_to", "messaged_manual",
 )
+
+
+# ---- sorting --------------------------------------------------------------
+def _text_key(value: str) -> str:
+    """Sort key for a text column: case-insensitive, accents folded.
+
+    Without the folding, "Ángel" sorts after "Zoe" -- accented letters live far
+    above Z in Unicode -- so an A-Z list would end on a name that starts with A.
+    Folding puts it where a reader looks for it, next to "Andres".
+    """
+    decomposed = unicodedata.normalize("NFKD", (value or "").strip().lower())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def _name_of(rec: dict) -> str:
+    return _text_key(rec.get("name") or rec.get("username") or "")
+
+
+def _email_of(rec: dict) -> str:
+    emails = rec.get("emails") or []
+    return _text_key(emails[0] if emails else "")
+
+
+def _blank_last(key_fn):
+    """Wrap a text key so empty values sink to the bottom whichever way we sort.
+
+    With `reverse=True` Python flips the whole tuple, so a plain (blank, text)
+    key would float the blanks to the top. Negating the flag for the descending
+    variants keeps them where they belong.
+    """
+    def ascending(rec):
+        value = key_fn(rec)
+        return (value == "", value)
+
+    def descending(rec):
+        value = key_fn(rec)
+        return (value != "", value)
+
+    return ascending, descending
+
+
+_name_asc, _name_desc = _blank_last(_name_of)
+_email_asc, _email_desc = _blank_last(_email_of)
+_country_asc, _country_desc = _blank_last(lambda r: _text_key(r.get("country") or ""))
+
+# sort key -> (key function, reverse). The date sorts keep their old names, so
+# links and bookmarks made before the other columns existed still work.
+SORTS = {
+    "newest": (lambda r: r["_ts"], True),
+    "oldest": (lambda r: r["_ts"], False),
+    # Within one run the newest contact leads, so a run reads like a batch.
+    "run_desc": (lambda r: (r.get("run") or 0, r["_ts"]), True),
+    "run_asc": (lambda r: (r.get("run") or 0, -r["_ts"]), False),
+    "name_asc": (_name_asc, False),
+    "name_desc": (_name_desc, True),
+    "email_asc": (_email_asc, False),
+    "email_desc": (_email_desc, True),
+    "country_asc": (_country_asc, False),
+    "country_desc": (_country_desc, True),
+}
+DEFAULT_SORT = "newest"
 
 # In-memory dataset, guarded by DATA_LOCK (ThreadingHTTPServer is multi-threaded).
 DATA_LOCK = threading.RLock()
@@ -556,6 +701,56 @@ def _scrape_argv(key: str, params: dict) -> list[str]:
         cursor = (STATE.get("aboutme") or {}).get("cursor")
         if cursor:
             argv += ["--start-sitemap", cursor]
+        return argv
+    if key == "github":
+        argv = [py, str(SCRAPERS_DIR / "github" / "github_scrape.py"),
+                "--cursor-out", str(GITHUB_CURSOR)]
+        # A target is a total ("get me to 1000 users"), so it counts the rows
+        # already on disk and the run keeps sweeping until it is met. Without
+        # one, a click means "fetch a batch" and 50 is a sane batch.
+        target = _to_int(str(params.get("target", "")), 0)
+        if target > 0:
+            argv += ["--target", str(target)]
+        # A per-run cap on top of a target would defeat it -- the run would stop
+        # at 50 kept and never reach 1000 -- so the two are not combined.
+        limit = _to_int(str(params.get("limit", "")), 0 if target > 0 else 50)
+        argv += ["--limit", str(limit if target <= 0 else 0)]
+        regions = params.get("regions")
+        if regions:
+            argv += ["--regions", str(regions)]
+        pages = _to_int(str(params.get("pages", "")), 0)
+        if pages > 0:
+            argv += ["--pages", str(pages)]
+        # Narrowing filters, mirroring the UI facet controls: scrape only the
+        # countries / account ages / gender being targeted. The scraper applies
+        # country + age cheaply (off the profile) and gender via Claude.
+        country = str(params.get("country", "")).strip()
+        if country:
+            argv += ["--countries", country]
+        age_min = _to_float(str(params.get("age_min", "")))
+        age_max = _to_float(str(params.get("age_max", "")))
+        if age_min is not None:
+            argv += ["--age-min", str(age_min)]
+        if age_max is not None:
+            argv += ["--age-max", str(age_max)]
+        gender = str(params.get("gender", "")).strip().lower()
+        # The UI gender facet is multi-select; the scraper targets one gender,
+        # so only forward it when exactly one of male/female is requested.
+        genders = [g for g in gender.split(",") if g in ("male", "female")]
+        if len(genders) == 1:
+            argv += ["--gender", genders[0]]
+        # Explore a fresh, random slice of the world on every click. The walk
+        # order is otherwise fixed, so a plain restart re-issues the same first
+        # queries -- whose users are already on disk and get skipped -- and
+        # wastes the run re-covering old ground. Shuffling heads somewhere new
+        # each time; already-scraped users are still de-duped by `done`, so
+        # nothing is collected twice. `shuffle=0` opts back into cursor resume.
+        if str(params.get("shuffle", "1")) not in ("0", "false", "no"):
+            argv.append("--shuffle")
+        else:
+            cursor = (STATE.get("github") or {}).get("cursor")
+            if cursor:
+                argv += ["--start-location", cursor]
         return argv
     raise ValueError(f"unknown source: {key}")
 
@@ -1088,8 +1283,86 @@ def _mark_sent(rec_id: str, sent: bool) -> dict | None:
              "messaged_manual")}
 
 
+def _mark_sent_many(ids: list[str], sent: bool) -> int:
+    """Bulk _mark_sent (the export dialog's "mark all as sent"): same rules,
+    but one log write and one refresh pass instead of one per contact."""
+    with DATA_LOCK:
+        recs = [r for r in (RECORD_BY_ID.get(i or "") for i in ids)
+                if r and r.get("emails")]
+    touched: set[str] = set()
+    with SENT_LOCK:
+        for rec in recs:
+            emails = [e.strip().lower() for e in rec["emails"] if e.strip()]
+            if not emails:
+                continue
+            if sent:
+                ent = SENT_LOG.get(emails[0]) or {}
+                if ent.get("count", 0) <= 0:
+                    SENT_LOG[emails[0]] = {"count": 1, "last_sent": _now_iso(),
+                                           "last_subject": "", "manual": True}
+            else:
+                for e in emails:
+                    SENT_LOG.pop(e, None)
+            touched.update(emails)
+    _save_sent_log()
+    with DATA_LOCK:
+        for rec in ALL_RECORDS:
+            if touched.intersection(rec.get("emails") or ()):
+                _set_sent_fields(rec)
+    return len(recs)
+
+
+_SECONDS_PER_YEAR = 365.25 * 86400
+
+
+def _age_years(rec: dict, now_ts: float) -> float | None:
+    """Account age in years from the join date, or None if it is unknown."""
+    created = rec.get("_created_ts") or 0.0
+    if created <= 0:
+        return None
+    return max(0.0, (now_ts - created) / _SECONDS_PER_YEAR)
+
+
+def _facets(items: list[dict], now_ts: float) -> dict:
+    """Counts per country, gender and age band over the given set.
+
+    These describe the set the user is narrowing (source + search + sent), and
+    are computed *before* the country/gender/age filters so the numbers hold
+    steady as those are toggled -- a facet shows how many a choice would match,
+    which is the point of showing the count next to it.
+    """
+    countries: dict[str, dict] = {}
+    genders = {"male": 0, "female": 0, "unknown": 0}
+    ages = {k: 0 for k in ("lt1", "1to3", "3to5", "5to10", "gte10", "unknown")}
+    for rec in items:
+        name = (rec.get("country") or "").strip()
+        if name and name.lower() != "unknown":
+            entry = countries.setdefault(
+                name, {"name": name, "code": rec.get("country_code") or "", "count": 0})
+            entry["count"] += 1
+        g = (rec.get("gender") or "").strip().lower()
+        genders[g if g in genders else "unknown"] += 1
+        age = _age_years(rec, now_ts)
+        if age is None:
+            ages["unknown"] += 1
+        elif age < 1:
+            ages["lt1"] += 1
+        elif age < 3:
+            ages["1to3"] += 1
+        elif age < 5:
+            ages["3to5"] += 1
+        elif age < 10:
+            ages["5to10"] += 1
+        else:
+            ages["gte10"] += 1
+    country_list = sorted(countries.values(),
+                          key=lambda c: (-c["count"], c["name"].lower()))
+    return {"countries": country_list, "genders": genders, "ages": ages}
+
+
 def query_records(source: str, q: str, sort: str, page: int, per_page: int,
-                  messaged: str = "all"):
+                  messaged: str = "all", country: str = "", gender: str = "",
+                  age_min: str = "", age_max: str = ""):
     with DATA_LOCK:
         items = BY_SOURCE.get(source) if source != "all" else ALL_RECORDS
         if items is None:  # unknown source -> behave like "all"
@@ -1115,8 +1388,51 @@ def query_records(source: str, q: str, sort: str, page: int, per_page: int,
             items = [r for r in items if not r.get("messaged")]
         messaged = ",".join(sel) if sel else "all"
 
-        reverse = sort != "oldest"
-        items = sorted(items, key=lambda r: r["_ts"], reverse=reverse)
+        # Facets describe this set (before country/gender/age narrow it).
+        now_ts = datetime.now(timezone.utc).timestamp()
+        facets = _facets(items, now_ts)
+
+        # Country: comma-separated names OR codes, case-insensitive, any-of.
+        wanted_countries = {c.strip().lower() for c in (country or "").split(",")
+                            if c.strip()}
+        if wanted_countries:
+            items = [r for r in items
+                     if (r.get("country") or "").strip().lower() in wanted_countries
+                     or (r.get("country_code") or "").strip().lower() in wanted_countries]
+
+        # Gender: any-of male/female/unknown.
+        wanted_genders = {g.strip().lower() for g in (gender or "").split(",")
+                          if g.strip() in ("male", "female", "unknown")}
+        if wanted_genders:
+            items = [r for r in items
+                     if ((r.get("gender") or "").strip().lower() or "unknown")
+                     in wanted_genders]
+
+        # Account age in years, min inclusive and max EXCLUSIVE -- so a one-year
+        # band [N, N+1) means "N years old", and the bands tile without overlap
+        # (they match the facet counts). A record whose join date is unknown
+        # cannot satisfy an age bound, so it drops out.
+        lo = _to_float(age_min)
+        hi = _to_float(age_max)
+        age_min = "" if lo is None else str(lo)
+        age_max = "" if hi is None else str(hi)
+        if lo is not None or hi is not None:
+            kept = []
+            for r in items:
+                age = _age_years(r, now_ts)
+                if age is None:
+                    continue
+                if lo is not None and age < lo:
+                    continue
+                if hi is not None and age >= hi:
+                    continue
+                kept.append(r)
+            items = kept
+
+        key_fn, reverse = SORTS.get(sort) or SORTS[DEFAULT_SORT]
+        if sort not in SORTS:
+            sort = DEFAULT_SORT
+        items = sorted(items, key=key_fn, reverse=reverse)
 
         total = len(items)
         total_pages = max(1, (total + per_page - 1) // per_page)
@@ -1136,9 +1452,119 @@ def query_records(source: str, q: str, sort: str, page: int, per_page: int,
             "source": source,
             "messaged": messaged,
             "messaged_counts": messaged_counts,
+            "country": ",".join(sorted(wanted_countries)),
+            "gender": ",".join(sorted(wanted_genders)),
+            "age_min": age_min,
+            "age_max": age_max,
+            "facets": facets,
             "stats": STATS_BY_SOURCE.get(source, STATS_BY_SOURCE["all"]),
             "sources": SOURCE_LIST,
         }
+
+
+def export_records(source: str, gender: str = "", active_op: str = "",
+                   active_date: str = "", joined_op: str = "",
+                   joined_date: str = "", runs: str = "", country: str = "",
+                   messaged: str = "", limit: int = 0):
+    """Rows for the CSV export dialog: filtered, sorted, capped.
+
+    Also returns the option lists (scrape runs, countries) the dialog builds
+    its controls from -- computed over the WHOLE source set, so choices don't
+    vanish from the dialog as the selection narrows. Unlike /api/emails this
+    is not paginated: the preview table IS the file that gets downloaded, so
+    the response must hold every row (bounded by ``limit``).
+    """
+    with DATA_LOCK:
+        items = BY_SOURCE.get(source) or []
+        # An export of "main emails" has no use for a row without one.
+        items = [r for r in items if r.get("emails")]
+
+        run_counts: dict[int, int] = {}
+        country_counts: dict[str, dict] = {}
+        for r in items:
+            run = r.get("run") or 0
+            run_counts[run] = run_counts.get(run, 0) + 1
+            name = (r.get("country") or "").strip()
+            if name:
+                ent = country_counts.setdefault(
+                    name, {"name": name, "code": "", "count": 0})
+                ent["count"] += 1
+                ent["code"] = ent["code"] or (r.get("country_code") or "").strip()
+        options = {
+            "runs": [{"run": k, "count": v}
+                     for k, v in sorted(run_counts.items())],
+            "countries": sorted(country_counts.values(),
+                                key=lambda c: (-c["count"], c["name"].lower())),
+        }
+
+        # Sent/unsent: same contract as /api/emails -- picking both (or
+        # neither) means "all".
+        sel = sorted({m for m in (messaged or "").split(",")
+                      if m in ("sent", "unsent")})
+        if sel == ["sent"]:
+            items = [r for r in items if r.get("messaged")]
+        elif sel == ["unsent"]:
+            items = [r for r in items if not r.get("messaged")]
+
+        # Gender: any-of male/female/unknown (same contract as /api/emails).
+        wanted_genders = {g.strip().lower() for g in (gender or "").split(",")
+                          if g.strip() in ("male", "female", "unknown")}
+        if wanted_genders:
+            items = [r for r in items
+                     if ((r.get("gender") or "").strip().lower() or "unknown")
+                     in wanted_genders]
+
+        # Country: comma-separated names OR codes, case-insensitive, any-of.
+        wanted_countries = {c.strip().lower() for c in (country or "").split(",")
+                            if c.strip()}
+        if wanted_countries:
+            items = [r for r in items
+                     if (r.get("country") or "").strip().lower() in wanted_countries
+                     or (r.get("country_code") or "").strip().lower() in wanted_countries]
+
+        # Date conditions: after/before a calendar day. A record missing the
+        # date in question cannot satisfy a condition on it, so it drops out.
+        def _date_filter(items, op, date, ts_of):
+            cutoff = _parse_ts(date) if date else 0.0
+            if op not in ("after", "before") or not cutoff:
+                return items
+            if op == "after":
+                return [r for r in items if ts_of(r) >= cutoff]
+            return [r for r in items if 0.0 < ts_of(r) < cutoff]
+
+        items = _date_filter(items, active_op, active_date,
+                             lambda r: _parse_ts(r.get("activity_at") or ""))
+        items = _date_filter(items, joined_op, joined_date,
+                             lambda r: r.get("_created_ts") or 0.0)
+
+        # Step = scrape run number, any-of.
+        wanted_runs = {_to_int(x.strip(), -1)
+                       for x in (runs or "").split(",") if x.strip()}
+        wanted_runs.discard(-1)
+        if wanted_runs:
+            items = [r for r in items if (r.get("run") or 0) in wanted_runs]
+
+        matched = len(items)
+        items = sorted(items, key=lambda r: r["_ts"], reverse=True)
+        if limit > 0:
+            items = items[:limit]
+
+        # Slim rows: exactly what the preview table and the CSV need. Only the
+        # main email (emails[0], personal-first) is exported -- by design.
+        rows = [{
+            "id": r["id"],
+            "name": r.get("name") or "",
+            "username": r.get("username") or "",
+            "email": r["emails"][0],
+            "gender": r.get("gender") or "",
+            "country": r.get("country") or "",
+            "run": r.get("run") or 0,
+            "created_at": r.get("created_at") or "",
+            "activity_at": r.get("activity_at") or "",
+            "messaged": bool(r.get("messaged")),
+        } for r in items]
+
+        return {"items": rows, "matched": matched, "options": options}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1180,7 +1606,7 @@ class Handler(BaseHTTPRequestHandler):
                 "service": "email-scrapper data API",
                 "ui": "Run the Next.js app in web/ (npm run dev); it consumes this API.",
                 "endpoints": [
-                    "/api/emails", "/api/email?id=", "/api/stats",
+                    "/api/emails", "/api/email?id=", "/api/export", "/api/stats",
                     "/api/scrape", "/api/scrape/status", "/api/scrape/stop",
                     "/api/message/generate", "/api/message/send",
                     "/api/message/mark",
@@ -1205,7 +1631,28 @@ class Handler(BaseHTTPRequestHandler):
             sort = params.get("sort", ["newest"])[0]
             source = params.get("source", ["all"])[0]
             messaged = params.get("messaged", ["all"])[0]
-            self._send_json(query_records(source, q, sort, page, per_page, messaged))
+            self._send_json(query_records(
+                source, q, sort, page, per_page, messaged,
+                country=params.get("country", [""])[0],
+                gender=params.get("gender", [""])[0],
+                age_min=params.get("age_min", [""])[0],
+                age_max=params.get("age_max", [""])[0],
+            ))
+            return
+
+        if route == "/api/export":
+            self._send_json(export_records(
+                params.get("source", ["github"])[0],
+                gender=params.get("gender", [""])[0],
+                active_op=params.get("active_op", [""])[0],
+                active_date=params.get("active_date", [""])[0],
+                joined_op=params.get("joined_op", [""])[0],
+                joined_date=params.get("joined_date", [""])[0],
+                runs=params.get("runs", [""])[0],
+                country=params.get("country", [""])[0],
+                messaged=params.get("messaged", [""])[0],
+                limit=_to_int(params.get("limit", ["0"])[0], 0),
+            ))
             return
 
         if route == "/api/email":
@@ -1253,6 +1700,14 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/message/mark":
             data = self._read_json_body()
+            # Bulk form: {"ids": [...], "sent": true} -- used by the export
+            # dialog to flag everything it just exported in one call.
+            ids = data.get("ids")
+            if isinstance(ids, list):
+                n = _mark_sent_many([str(i) for i in ids],
+                                    bool(data.get("sent", True)))
+                self._send_json({"ok": True, "marked": n})
+                return
             view = _mark_sent(data.get("id") or "", bool(data.get("sent")))
             if view is None:
                 self._send_json({"ok": False, "error": "unknown contact id"}, 404)
@@ -1281,7 +1736,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/scrape":
             scrape_params = {}
-            for k in ("pages", "limit"):
+            for k in ("pages", "limit", "regions", "target",
+                      "country", "gender", "age_min", "age_max"):
                 if k in params:
                     scrape_params[k] = params[k][0]
             if params.get("full", ["0"])[0] in ("1", "true", "yes"):
@@ -1298,6 +1754,14 @@ def _to_int(value: str, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _to_float(value: str):
+    """Parse a float, or None for blank/garbage. Negatives clamp to 0."""
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def main():

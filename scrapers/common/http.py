@@ -63,7 +63,9 @@ def fetch(
             if attempt == tries:
                 raise
             time.sleep(1.5 * attempt)
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError):
+            # OSError is the superset of URLError, socket timeouts and the
+            # connection resets servers hand out mid-run -- all retryable.
             if attempt == tries:
                 raise
             time.sleep(1.5 * attempt)

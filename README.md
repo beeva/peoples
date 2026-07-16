@@ -23,6 +23,9 @@ scrapers/
       threejs_posts.jsonl      #   every post (created on full run)
   aboutme/                     # about.me public-profile scraper
     aboutme_scrape.py          #   -> users.jsonl / users.json
+  github/                      # GitHub profile + portfolio-site scraper
+    github_scrape.py           #   -> users.jsonl / users.json
+    regions.py                 #   US / North America / Europe / South America filter
 
 server.py                      # zero-dependency data API + standalone UI
 index.html                     #   the standalone single-page UI (served by server.py)
@@ -30,7 +33,7 @@ web/                           # Next.js (App Router) frontend
 package.json                   # orchestrates server.py + web/ together
 ```
 
-The three scrapers are independent but share `scrapers/common/`, so each one is
+The scrapers are independent but share `scrapers/common/`, so each one is
 just its site-specific glue (URL enumeration + record shape) on top of the
 common HTTP / email / JSONL machinery.
 
@@ -48,14 +51,18 @@ python scrapers/devto/devto_scrape.py
 
 # about.me profiles -> scrapers/aboutme/users.jsonl
 python scrapers/aboutme/aboutme_scrape.py --limit 100
+
+# GitHub users + their portfolio sites -> scrapers/github/users.jsonl
+# (US / Europe / South America only; wants a GITHUB_TOKEN in .env)
+python scrapers/github/github_scrape.py --limit 100
 ```
 
-All three are **resumable** (re-running skips records already written) and
+All of them are **resumable** (re-running skips records already written) and
 **polite** (retry + back-off, honouring `Retry-After`).
 
 ## Browsing the contacts
 
-The data server loads all three datasets, normalises them into one record shape
+The data server loads every dataset, normalises them into one record shape
 (tagged with a `source`), and exposes them together with a category selector:
 
 | source      | file                                              |
@@ -63,6 +70,7 @@ The data server loads all three datasets, normalises them into one record shape
 | `discourse` | `scrapers/discourse/threejs/threejs_emails.jsonl` |
 | `devto`     | `scrapers/devto/jobs.json`                         |
 | `aboutme`   | `scrapers/aboutme/users.jsonl`                     |
+| `github`    | `scrapers/github/users.jsonl`                      |
 
 It exposes them two ways:
 
@@ -72,15 +80,16 @@ It exposes them two ways:
 - **`web/`** — a richer Next.js frontend that fetches from the same API.
 
 Both frontends show a tab bar to filter by source (**All / three.js forum /
-dev.to jobs / about.me**) and adapt each card to the source (forum topics, job
-posts with apply/messaging links + tags, or profiles with role/location).
+dev.to jobs / about.me / GitHub**) and adapt each card to the source (forum
+topics, job posts with apply/messaging links + tags, or profiles with
+role/location).
 
 ### API
 
 ```
-GET  /api/emails?source=all|discourse|devto|aboutme&q=&sort=newest|oldest&page=&per_page=
+GET  /api/emails?source=all|discourse|devto|aboutme|github&q=&sort=newest|oldest&page=&per_page=
 GET  /api/stats?source=...
-POST /api/scrape?source=discourse|devto|aboutme[&pages=&limit=&full=1]   # start a re-scrape
+POST /api/scrape?source=discourse|devto|aboutme|github[&pages=&limit=&regions=&full=1]  # start a re-scrape
 POST /api/scrape/stop?source=...                                         # stop a running job
 GET  /api/scrape/status?source=...                                       # poll a job (live added count)
 ```
@@ -112,6 +121,7 @@ re-scraping is cheap and safe to repeat:
 | `discourse` | highest `topic_id` scraped (high-water mark) | re-scrapes only topics with `id >` the checkpoint; contacts also de-duped by `post_id` so a revisit never writes twice |
 | `devto`     | article `id`s in `jobs.json`               | pages newest-first, stops once a page is fully known        |
 | `aboutme`   | last sitemap walked + saved `username`s    | resumes from the saved sitemap cursor, skips known usernames |
+| `github`    | location term in flight + saved `login`s   | resumes at the saved location term, skips known logins       |
 
 **Checkpointing.** Each scrape advances its checkpoint after every item and
 persists it to `scrapers/state.json` (git-ignored) via a per-source `.cursor`
@@ -120,7 +130,7 @@ re-fetches what's already saved, even across stops, restarts, or `--limit`-bound
 runs. The discourse checkpoint is seeded on first run from the highest `topic_id`
 already in the data, so an initial re-scrape jumps straight to genuinely new
 topics. (Pass `full=1` to dev.to, or delete `state.json`, to rebuild from scratch.) UI-triggered runs are bounded
-(`devto` → `--pages 3`, `aboutme` → `--limit 50`, `discourse` → `--limit 300`)
+(`devto` → `--pages 3`, `aboutme` / `github` → `--limit 50`, `discourse` → `--limit 300`)
 so each click returns promptly; click again to continue where it left off. Pass
 `pages` / `limit` query params to override, or `full=1` (dev.to) to rebuild from
 scratch. Run a scraper directly (see above) for an unbounded crawl.
@@ -129,6 +139,9 @@ scratch. Run a scraper directly (see above) for an unbounded crawl.
 
 - Python 3.9+
 - Node.js 18+ (only for the `web/` frontend)
+- A `GITHUB_TOKEN` in `.env` (only for the GitHub scraper — see
+  [`scrapers/github/README.md`](scrapers/github/README.md); without one the API
+  allows 60 requests/hour, which is too slow to be useful)
 
 ### Run everything (one command)
 
@@ -148,7 +161,7 @@ npm run build && npm run start    # production
 
 | Service        | URL                     |
 | -------------- | ----------------------- |
-| Web frontend   | http://localhost:3000   |
+| Web frontend   | http://localhost:3090   |
 | Data server    | http://127.0.0.1:8000   |
 
 `Ctrl+C` stops both (processes are linked with `concurrently -k`).

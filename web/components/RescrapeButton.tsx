@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import type { SourceKey } from "@/lib/emails";
+import { ageToRange, parseFilter } from "@/lib/filters";
 
 interface JobStatus {
   status?: string; // idle | running | done | error
@@ -35,11 +36,44 @@ export default function RescrapeButton({
   label: string;
 }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [job, setJob] = useState<JobStatus>({ status: "idle" });
   const [busy, setBusy] = useState(false);
+  // Pre-filled to the server's default batch size so the box shows a real
+  // number, not just a placeholder; the user can overwrite it before scraping.
+  const [target, setTarget] = useState("50");
   const poll = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const running = busy || job.status === "running";
+
+  // What the active view filter will target when scraping (GitHub only). The
+  // filter panel above the table doubles as the scrape scope, so spell it out
+  // next to the button -- otherwise the link between the two is invisible.
+  const scrapeFilter = parseFilter({
+    country: searchParams.get("country") ?? undefined,
+    gender: searchParams.get("gender") ?? undefined,
+    age_op: searchParams.get("age_op") ?? undefined,
+    age: searchParams.get("age") ?? undefined,
+  });
+  const scopeBits: string[] = [];
+  if (scrapeFilter.countries.length) scopeBits.push(scrapeFilter.countries.join(", "));
+  if (scrapeFilter.genders.length) scopeBits.push(scrapeFilter.genders.join(" / "));
+  if (scrapeFilter.ageOp && scrapeFilter.ageValue) {
+    const word =
+      scrapeFilter.ageOp === "over"
+        ? "over"
+        : scrapeFilter.ageOp === "less"
+          ? "under"
+          : "exactly";
+    scopeBits.push(`${word} ${scrapeFilter.ageValue} yrs`);
+  }
+  const scopeText = scopeBits.join(" · ");
+
+  // How many users this run should collect before stopping. The GitHub scraper
+  // enumerates a world far bigger than any one run, so it is the one that needs
+  // pointing at a number; the others walk a finite feed to its end.
+  const supportsTarget = source === "github";
+  const wanted = Number(target) || 0;
 
   const stopPolling = useCallback(() => {
     if (poll.current) {
@@ -100,7 +134,26 @@ export default function RescrapeButton({
     setBusy(true);
     setJob((j) => ({ ...j, status: "running", message: "" }));
     try {
-      const res = await fetch(`/api/scrape?source=${source}`, {
+      const qs = new URLSearchParams({ source });
+      // How many users to collect this run. Blank = the server's default batch.
+      if (supportsTarget && wanted > 0) qs.set("limit", String(wanted));
+      // Target the scrape at whatever the view is filtered to: scrape only
+      // those countries / account ages / gender. So "filter, then Rescrape"
+      // goes and finds more of exactly what you're looking at.
+      if (supportsTarget) {
+        const f = parseFilter({
+          country: searchParams.get("country") ?? undefined,
+          gender: searchParams.get("gender") ?? undefined,
+          age_op: searchParams.get("age_op") ?? undefined,
+          age: searchParams.get("age") ?? undefined,
+        });
+        if (f.countries.length) qs.set("country", f.countries.join(","));
+        if (f.genders.length) qs.set("gender", f.genders.join(","));
+        const { min, max } = ageToRange(f);
+        if (min) qs.set("age_min", min);
+        if (max) qs.set("age_max", max);
+      }
+      const res = await fetch(`/api/scrape?${qs}`, {
         method: "POST",
         cache: "no-store",
       });
@@ -120,7 +173,15 @@ export default function RescrapeButton({
 
   let statusText = `Last scraped ${relTime(job.last_run)}`;
   if (running) {
-    statusText = job.added != null ? `Scraping… +${job.added} new` : "Scraping…";
+    // Progress is counted in users collected *this run*, which is what the
+    // number in the box asks for -- "+40 of 1000", not the size of the dataset.
+    const added = job.added ?? 0;
+    statusText =
+      wanted > 0
+        ? `Scraping… +${added} of ${wanted}`
+        : job.added != null
+          ? `Scraping… +${added} new`
+          : "Scraping…";
   } else if (job.status === "error") {
     statusText = `Error: ${job.message || job.error || "failed"}`;
   } else if (job.status === "stopped") {
@@ -131,11 +192,38 @@ export default function RescrapeButton({
 
   return (
     <div className="rescrape">
+      {supportsTarget && (
+        <label
+          className="scrape-target"
+          title="How many users to collect this run. Blank = 50. The walk is spread across every country, so a bigger number goes wider, not deeper into one place."
+        >
+          <span>Users</span>
+          <input
+            type="number"
+            min={1}
+            step={50}
+            inputMode="numeric"
+            value={target}
+            placeholder="50"
+            disabled={running}
+            onChange={(e) => setTarget(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !running) onClick();
+            }}
+          />
+        </label>
+      )}
       <button
         className="rescrape-btn"
         onClick={onClick}
         disabled={running}
-        title={`Re-scrape ${label} (only fetches new content)`}
+        title={
+          supportsTarget && scopeText
+            ? `Scrape ${wanted > 0 ? wanted : "more"} ${label} users matching: ${scopeText}`
+            : supportsTarget && wanted > 0
+              ? `Scrape ${wanted} more ${label} users with an email`
+              : `Re-scrape ${label} (only fetches new content)`
+        }
       >
         {running ? (
           <span className="spin-mini-inline" aria-hidden="true" />
@@ -154,6 +242,18 @@ export default function RescrapeButton({
         )}
         {running ? "Scraping…" : `Rescrape ${label}`}
       </button>
+      {supportsTarget && scopeText && !running && (
+        <span
+          className="scrape-scope"
+          title="The Country / Gender / Age filters above set what this scrape targets. Clear them to scrape everything."
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+               strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+          </svg>
+          targeting {scopeText}
+        </span>
+      )}
       {running && (
         <button className="stop-btn" onClick={onStop} title="Stop scraping (keeps what was collected)">
           <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">

@@ -46,3 +46,73 @@ def extract_emails(text: str | None, *, include_mailto: bool = True) -> list[str
 def extract_mailto(text: str | None) -> list[str]:
     """Return unique addresses from ``mailto:`` links only."""
     return sorted({m.lower() for m in MAILTO_RE.findall(text or "")})
+
+
+# ---- which of a person's addresses to write to ----------------------------
+# Role addresses: deliverable, but they reach a desk rather than a person. For
+# outreach that is the wrong end of the building, so they always sort last.
+ROLE_RE = re.compile(
+    r"^(support|help|info|contact|hello|hi|team|admin|sales|marketing|press"
+    r"|careers|jobs|billing|legal|privacy|security|abuse|webmaster|postmaster"
+    r"|office|mail|enquiries|inquiries|feedback|donate|hey|noreply|no-reply)@",
+    re.I,
+)
+# Mailboxes the person owns themselves, rather than one their employer owns.
+# These outrank a work address: the employer's may stop being theirs at any
+# time, and it is read at a desk they may not want cold mail at. A `gmail.com`
+# is a person; a `bigcorp.com` might be a shared alias with a personal-looking
+# name. Wildcarded suffixes (hotmail.co.uk, yandex.ru, ...) via `endswith`.
+PERSONAL_MAIL_DOMAINS = (
+    "gmail.com", "googlemail.com", "outlook.", "hotmail.", "live.",
+    "msn.com", "yahoo.", "ymail.com", "aol.com", "icloud.com", "me.com",
+    "mac.com", "proton.me", "protonmail.com", "pm.me", "tutanota.com",
+    "tuta.io", "gmx.", "web.de", "mail.com", "mail.ru", "yandex.",
+    "zoho.com", "fastmail.com", "hey.com", "engineer.com", "qq.com",
+    "163.com", "126.com", "naver.com", "daum.net", "seznam.cz", "wp.pl",
+    "o2.pl", "interia.pl", "libero.it", "orange.fr", "free.fr",
+    "laposte.net", "bol.com.br", "uol.com.br", "terra.com.br",
+)
+
+
+def is_role_email(email: str) -> bool:
+    """True for support@/info@/... -- a desk, not a person."""
+    return bool(ROLE_RE.match((email or "").strip()))
+
+
+def is_personal_email(email: str) -> bool:
+    """True for a mailbox the person owns (gmail, proton, gmx, ...).
+
+    An entry ending in a dot is a family: "yandex." matches yandex.ru and
+    yandex.com, "hotmail." every country's hotmail. Anything else is exact.
+    """
+    domain = (email or "").strip().lower().rpartition("@")[2]
+    if not domain:
+        return False
+    for known in PERSONAL_MAIL_DOMAINS:
+        if known.endswith("."):
+            if domain.startswith(known):
+                return True
+        elif domain == known:
+            return True
+    return False
+
+
+def email_rank(email: str) -> tuple[int, int]:
+    """Sort key: personal mailbox first, then work address, role address last.
+
+    Only the *relative* order matters -- callers sort with this and keep their
+    own tiebreak (for the scrapers, which source an address came from). Being a
+    stable sort, an address that ties keeps the order the caller gave it.
+    """
+    return (1 if is_role_email(email) else 0,
+            0 if is_personal_email(email) else 1)
+
+
+def personal_first(emails) -> list[str]:
+    """Re-order a person's addresses so the one to write to leads.
+
+    Stable, so whatever order the caller established (for GitHub, how much the
+    source is trusted: a profile email over a commit email) survives as the
+    tiebreak within a rank.
+    """
+    return sorted([e for e in (emails or []) if e], key=email_rank)
