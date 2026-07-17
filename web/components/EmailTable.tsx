@@ -279,7 +279,7 @@ function SortHeader({
 
   return (
     <th className={className} aria-sort={active ? (sort === asc ? "ascending" : "descending") : "none"}>
-      <Link href={qs ? `/?${qs}` : "/"} className="col-sort" title={title || `Sort by ${label}`}>
+      <Link href={qs ? `/?${qs}` : "/"} scroll={false} className="col-sort" title={title || `Sort by ${label}`}>
         {label}
         <span className="sort-caret" aria-hidden="true">
           {active ? (sort === asc ? "▲" : "▼") : "↕"}

@@ -739,6 +739,13 @@ def _scrape_argv(key: str, params: dict) -> list[str]:
         genders = [g for g in gender.split(",") if g in ("male", "female")]
         if len(genders) == 1:
             argv += ["--gender", genders[0]]
+        # Joined / last-active calendar windows: the UI sends an op + a date;
+        # the scraper takes them as --<field>-after / --<field>-before.
+        for field in ("joined", "active"):
+            op = str(params.get(f"{field}_op", "")).strip().lower()
+            date = str(params.get(f"{field}_date", "")).strip()
+            if op in ("after", "before") and date:
+                argv += [f"--{field}-{op}", date]
         # Explore a fresh, random slice of the world on every click. The walk
         # order is otherwise fixed, so a plain restart re-issues the same first
         # queries -- whose users are already on disk and get skipped -- and
@@ -1323,6 +1330,21 @@ def _age_years(rec: dict, now_ts: float) -> float | None:
     return max(0.0, (now_ts - created) / _SECONDS_PER_YEAR)
 
 
+def _filter_by_date(items: list[dict], op: str, date: str, ts_of) -> list[dict]:
+    """Keep items whose date is after/before a calendar day.
+
+    ``after`` is inclusive, ``before`` exclusive; a record missing the date in
+    question cannot satisfy a condition on it, so it drops out. Shared by the
+    list query and the export dialog so both mean the same thing by "after".
+    """
+    cutoff = _parse_ts(date) if date else 0.0
+    if op not in ("after", "before") or not cutoff:
+        return items
+    if op == "after":
+        return [r for r in items if ts_of(r) >= cutoff]
+    return [r for r in items if 0.0 < ts_of(r) < cutoff]
+
+
 def _facets(items: list[dict], now_ts: float) -> dict:
     """Counts per country, gender and age band over the given set.
 
@@ -1334,6 +1356,7 @@ def _facets(items: list[dict], now_ts: float) -> dict:
     countries: dict[str, dict] = {}
     genders = {"male": 0, "female": 0, "unknown": 0}
     ages = {k: 0 for k in ("lt1", "1to3", "3to5", "5to10", "gte10", "unknown")}
+    runs: dict[int, int] = {}
     for rec in items:
         name = (rec.get("country") or "").strip()
         if name and name.lower() != "unknown":
@@ -1342,6 +1365,11 @@ def _facets(items: list[dict], now_ts: float) -> dict:
             entry["count"] += 1
         g = (rec.get("gender") or "").strip().lower()
         genders[g if g in genders else "unknown"] += 1
+        # Step = scrape run number. Run 0 means "the source doesn't number
+        # its runs", which is not a step anyone can meaningfully pick.
+        run = rec.get("run") or 0
+        if run > 0:
+            runs[run] = runs.get(run, 0) + 1
         age = _age_years(rec, now_ts)
         if age is None:
             ages["unknown"] += 1
@@ -1357,12 +1385,16 @@ def _facets(items: list[dict], now_ts: float) -> dict:
             ages["gte10"] += 1
     country_list = sorted(countries.values(),
                           key=lambda c: (-c["count"], c["name"].lower()))
-    return {"countries": country_list, "genders": genders, "ages": ages}
+    run_list = [{"run": k, "count": v} for k, v in sorted(runs.items())]
+    return {"countries": country_list, "genders": genders, "ages": ages,
+            "runs": run_list}
 
 
 def query_records(source: str, q: str, sort: str, page: int, per_page: int,
                   messaged: str = "all", country: str = "", gender: str = "",
-                  age_min: str = "", age_max: str = ""):
+                  age_min: str = "", age_max: str = "", runs: str = "",
+                  joined_op: str = "", joined_date: str = "",
+                  active_op: str = "", active_date: str = ""):
     with DATA_LOCK:
         items = BY_SOURCE.get(source) if source != "all" else ALL_RECORDS
         if items is None:  # unknown source -> behave like "all"
@@ -1407,6 +1439,19 @@ def query_records(source: str, q: str, sort: str, page: int, per_page: int,
             items = [r for r in items
                      if ((r.get("gender") or "").strip().lower() or "unknown")
                      in wanted_genders]
+
+        # Step (scrape run number): comma-separated, any-of.
+        wanted_runs = {_to_int(x.strip(), -1)
+                       for x in (runs or "").split(",") if x.strip()}
+        wanted_runs.discard(-1)
+        if wanted_runs:
+            items = [r for r in items if (r.get("run") or 0) in wanted_runs]
+
+        # Joined / last-active calendar windows.
+        items = _filter_by_date(items, joined_op, joined_date,
+                                lambda r: r.get("_created_ts") or 0.0)
+        items = _filter_by_date(items, active_op, active_date,
+                                lambda r: _parse_ts(r.get("activity_at") or ""))
 
         # Account age in years, min inclusive and max EXCLUSIVE -- so a one-year
         # band [N, N+1) means "N years old", and the bands tile without overlap
@@ -1454,6 +1499,7 @@ def query_records(source: str, q: str, sort: str, page: int, per_page: int,
             "messaged_counts": messaged_counts,
             "country": ",".join(sorted(wanted_countries)),
             "gender": ",".join(sorted(wanted_genders)),
+            "runs": ",".join(str(r) for r in sorted(wanted_runs)),
             "age_min": age_min,
             "age_max": age_max,
             "facets": facets,
@@ -1522,20 +1568,12 @@ def export_records(source: str, gender: str = "", active_op: str = "",
                      if (r.get("country") or "").strip().lower() in wanted_countries
                      or (r.get("country_code") or "").strip().lower() in wanted_countries]
 
-        # Date conditions: after/before a calendar day. A record missing the
-        # date in question cannot satisfy a condition on it, so it drops out.
-        def _date_filter(items, op, date, ts_of):
-            cutoff = _parse_ts(date) if date else 0.0
-            if op not in ("after", "before") or not cutoff:
-                return items
-            if op == "after":
-                return [r for r in items if ts_of(r) >= cutoff]
-            return [r for r in items if 0.0 < ts_of(r) < cutoff]
-
-        items = _date_filter(items, active_op, active_date,
-                             lambda r: _parse_ts(r.get("activity_at") or ""))
-        items = _date_filter(items, joined_op, joined_date,
-                             lambda r: r.get("_created_ts") or 0.0)
+        # Date conditions: after/before a calendar day (shared helper, same
+        # inclusive-after / exclusive-before contract as the list filter).
+        items = _filter_by_date(items, active_op, active_date,
+                                lambda r: _parse_ts(r.get("activity_at") or ""))
+        items = _filter_by_date(items, joined_op, joined_date,
+                                lambda r: r.get("_created_ts") or 0.0)
 
         # Step = scrape run number, any-of.
         wanted_runs = {_to_int(x.strip(), -1)
@@ -1637,6 +1675,11 @@ class Handler(BaseHTTPRequestHandler):
                 gender=params.get("gender", [""])[0],
                 age_min=params.get("age_min", [""])[0],
                 age_max=params.get("age_max", [""])[0],
+                runs=params.get("runs", [""])[0],
+                joined_op=params.get("joined_op", [""])[0],
+                joined_date=params.get("joined_date", [""])[0],
+                active_op=params.get("active_op", [""])[0],
+                active_date=params.get("active_date", [""])[0],
             ))
             return
 
@@ -1737,7 +1780,8 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/scrape":
             scrape_params = {}
             for k in ("pages", "limit", "regions", "target",
-                      "country", "gender", "age_min", "age_max"):
+                      "country", "gender", "age_min", "age_max",
+                      "joined_op", "joined_date", "active_op", "active_date"):
                 if k in params:
                     scrape_params[k] = params[k][0]
             if params.get("full", ["0"])[0] in ("1", "true", "yes"):

@@ -36,21 +36,8 @@ export default async function SlackPage({
     <>
       <header className="topbar">
         <div className="topbar-inner">
+          {/* Brand lives in the sidebar now; the topbar names the page. */}
           <div className="brand">
-            <div className="logo">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="#fff"
-                strokeWidth={2}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M12 2 2 7l10 5 10-5-10-5Z" />
-                <path d="m2 17 10 5 10-5" />
-                <path d="m2 12 10 5 10-5" />
-              </svg>
-            </div>
             <div>
               <h1>Slack Users</h1>
               <p>
@@ -62,12 +49,7 @@ export default async function SlackPage({
               </p>
             </div>
           </div>
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <Link href="/" className="tab">
-              ← Contacts
-            </Link>
-            <ThemeToggle />
-          </div>
+          <ThemeToggle />
         </div>
       </header>
 

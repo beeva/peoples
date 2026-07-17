@@ -1,4 +1,3 @@
-import Link from "next/link";
 import {
   ageActive,
   DEFAULT_SORT,
@@ -71,9 +70,18 @@ export default async function Home({
   // Keep the active country/gender/age filter in pagination and sort links.
   if (filter.countries.length) baseParams.country = filter.countries.join(",");
   if (filter.genders.length) baseParams.gender = filter.genders.join(",");
+  if (filter.runs.length) baseParams.runs = filter.runs.join(",");
   if (ageActive(filter)) {
     baseParams.age_op = filter.ageOp;
     baseParams.age = filter.ageValue;
+  }
+  if (filter.joinedOp && filter.joinedDate) {
+    baseParams.joined_op = filter.joinedOp;
+    baseParams.joined_date = filter.joinedDate;
+  }
+  if (filter.activeOp && filter.activeDate) {
+    baseParams.active_op = filter.activeOp;
+    baseParams.active_date = filter.activeDate;
   }
 
   const range =
@@ -91,32 +99,14 @@ export default async function Home({
     <>
       <header className="topbar">
         <div className="topbar-inner">
+          {/* Brand lives in the sidebar now; the topbar names the page. */}
           <div className="brand">
-            <div className="logo">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="#fff"
-                strokeWidth={2}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M12 2 2 7l10 5 10-5-10-5Z" />
-                <path d="m2 17 10 5 10-5" />
-                <path d="m2 12 10 5 10-5" />
-              </svg>
-            </div>
             <div>
-              <h1>Contact Directory</h1>
+              <h1>Contacts</h1>
               <p>{subtitle}</p>
             </div>
           </div>
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <Link href="/slack" className="tab">
-              Slack Users
-            </Link>
-            <ThemeToggle />
-          </div>
+          <ThemeToggle />
         </div>
       </header>
 

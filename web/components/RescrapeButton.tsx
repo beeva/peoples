@@ -54,6 +54,10 @@ export default function RescrapeButton({
     gender: searchParams.get("gender") ?? undefined,
     age_op: searchParams.get("age_op") ?? undefined,
     age: searchParams.get("age") ?? undefined,
+    joined_op: searchParams.get("joined_op") ?? undefined,
+    joined_date: searchParams.get("joined_date") ?? undefined,
+    active_op: searchParams.get("active_op") ?? undefined,
+    active_date: searchParams.get("active_date") ?? undefined,
   });
   const scopeBits: string[] = [];
   if (scrapeFilter.countries.length) scopeBits.push(scrapeFilter.countries.join(", "));
@@ -66,6 +70,12 @@ export default function RescrapeButton({
           ? "under"
           : "exactly";
     scopeBits.push(`${word} ${scrapeFilter.ageValue} yrs`);
+  }
+  if (scrapeFilter.joinedOp && scrapeFilter.joinedDate) {
+    scopeBits.push(`joined ${scrapeFilter.joinedOp} ${scrapeFilter.joinedDate}`);
+  }
+  if (scrapeFilter.activeOp && scrapeFilter.activeDate) {
+    scopeBits.push(`active ${scrapeFilter.activeOp} ${scrapeFilter.activeDate}`);
   }
   const scopeText = scopeBits.join(" · ");
 
@@ -146,12 +156,24 @@ export default function RescrapeButton({
           gender: searchParams.get("gender") ?? undefined,
           age_op: searchParams.get("age_op") ?? undefined,
           age: searchParams.get("age") ?? undefined,
+          joined_op: searchParams.get("joined_op") ?? undefined,
+          joined_date: searchParams.get("joined_date") ?? undefined,
+          active_op: searchParams.get("active_op") ?? undefined,
+          active_date: searchParams.get("active_date") ?? undefined,
         });
         if (f.countries.length) qs.set("country", f.countries.join(","));
         if (f.genders.length) qs.set("gender", f.genders.join(","));
         const { min, max } = ageToRange(f);
         if (min) qs.set("age_min", min);
         if (max) qs.set("age_max", max);
+        if (f.joinedOp && f.joinedDate) {
+          qs.set("joined_op", f.joinedOp);
+          qs.set("joined_date", f.joinedDate);
+        }
+        if (f.activeOp && f.activeDate) {
+          qs.set("active_op", f.activeOp);
+          qs.set("active_date", f.activeDate);
+        }
       }
       const res = await fetch(`/api/scrape?${qs}`, {
         method: "POST",

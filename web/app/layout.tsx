@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import Sidebar from "@/components/Sidebar";
 import "./globals.css";
 
 // Inter with tabular numerals — the workhorse UI face; the `--font-sans`
@@ -40,7 +41,12 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
       <body>
-        {children}
+        {/* App shell: fixed 240px nav rail + fluid content column. Overlays
+            (drawer/modals) are position:fixed, so they can stay outside. */}
+        <div className="app-shell">
+          <Sidebar />
+          <div className="app-content">{children}</div>
+        </div>
         {modal}
       </body>
     </html>

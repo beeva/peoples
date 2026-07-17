@@ -389,6 +389,33 @@ def account_age_years(created_at: str, now: float) -> float | None:
     return max(0.0, (now - ts) / SECONDS_PER_YEAR)
 
 
+def date_ts(value: str) -> float | None:
+    """Timestamp of an ISO date/datetime string, or None if unparseable.
+
+    Used by the --joined-*/--active-* filters; a bare date ('2024-06-01')
+    parses as local midnight, which is plenty for a day-granular filter.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _in_date_bounds(ts: float | None, after: float | None,
+                    before: float | None) -> bool:
+    """after inclusive, before exclusive -- the app's date-filter contract.
+    A missing date cannot clear a bound, matching the UI filters."""
+    if ts is None or ts <= 0:
+        return False
+    if after is not None and ts < after:
+        return False
+    if before is not None and ts >= before:
+        return False
+    return True
+
+
 _GENDER_SCHEMA = {
     "type": "object",
     "properties": {"gender": {"type": "string",
@@ -451,21 +478,24 @@ def infer_gender(name: str, location: str = "", bio: str = "") -> str:
 def scrape_user(login: str, *, regions, site_delay: float,
                 use_commits: bool = True, use_site: bool = True,
                 use_readme: bool = True, countries=None,
-                age_min=None, age_max=None, genders=None
+                age_min=None, age_max=None, genders=None,
+                joined_after=None, joined_before=None,
+                active_after=None, active_before=None,
                 ) -> tuple[dict | None, str]:
     """Fetch a profile, region-filter it, and gather its emails.
 
     Returns (record, "") for a keeper, or (None, reason) for someone we do not
     want -- "not-a-user" (an org), "off-region", "off-country", "off-age",
-    "no-email", "off-gender". The reason is what the caller writes to the skip
-    list, and it is only ever a *settled* verdict: a rate limit or a network
-    blip raises instead, so a user is never written off for a reason that might
-    not be true tomorrow.
+    "off-joined", "off-activity", "no-email", "off-gender". The reason is what
+    the caller writes to the skip list, and it is only ever a *settled*
+    verdict: a rate limit or a network blip raises instead, so a user is never
+    written off for a reason that might not be true tomorrow.
 
-    The filters are applied cheapest-first: region, then country and age (both
-    read straight off the one profile fetch), and only then the expensive email
-    gathering. Gender is last of all -- it needs a Claude call, so it runs only
-    for someone who already cleared every other bar and has an email.
+    The filters are applied cheapest-first: region, then country, age and join
+    date (all read straight off the one profile fetch), then last activity
+    (one events call), and only then the expensive email gathering. Gender is
+    last of all -- it needs a Claude call, so it runs only for someone who
+    already cleared every other bar and has an email.
     """
     prof = gh_get(f"{API}/users/{login}")
     if not prof or prof.get("type") != "User":
@@ -493,9 +523,25 @@ def scrape_user(login: str, *, regions, site_delay: float,
         if age_max is not None and age >= age_max:
             return None, "off-age"
 
+    # Join date, as an absolute calendar window (the age filter's relative
+    # cousin). Also read straight off the profile, so it costs nothing.
+    if joined_after is not None or joined_before is not None:
+        if not _in_date_bounds(date_ts(prof.get("created_at") or ""),
+                               joined_after, joined_before):
+            return None, "off-joined"
+
     bio = (prof.get("bio") or "").strip()
     site = site_url_of(prof.get("blog") or "")
     repos = user_repos(login)
+
+    # Last public activity. This costs one events call, so it only runs when
+    # an activity bound is actually set -- but the fetched date is then reused
+    # for the record, so a filtered run pays nothing extra overall.
+    last_act: str | None = None
+    if active_after is not None or active_before is not None:
+        last_act = last_activity(login, repos)
+        if not _in_date_bounds(date_ts(last_act), active_after, active_before):
+            return None, "off-activity"
 
     sources = {
         "profile": _clean([prof.get("email") or ""]),
@@ -547,7 +593,9 @@ def scrape_user(login: str, *, regions, site_delay: float,
         "followers": prof.get("followers") or 0,
         "public_repos": prof.get("public_repos") or 0,
         "created_at": prof.get("created_at") or "",       # the day they joined
-        "last_activity": last_activity(login, repos),     # last public activity
+        # Reuse the date fetched for the activity filter when it ran.
+        "last_activity": (last_act if last_act is not None
+                          else last_activity(login, repos)),
         "email": emails[0],
         "emails": emails,
         "email_sources": {k: v for k, v in sources.items() if v},
@@ -673,6 +721,17 @@ def main() -> int:
     ap.add_argument("--gender", default=None,
                     help="keep only this gender ('male' or 'female'), inferred "
                          "by Claude for near-keepers -- needs ANTHROPIC_API_KEY")
+    ap.add_argument("--joined-after", default=None, metavar="DATE",
+                    help="keep only accounts created on/after this ISO date "
+                         "(e.g. 2024-01-01)")
+    ap.add_argument("--joined-before", default=None, metavar="DATE",
+                    help="keep only accounts created before this ISO date")
+    ap.add_argument("--active-after", default=None, metavar="DATE",
+                    help="keep only users last publicly active on/after this "
+                         "ISO date (costs one extra API call per candidate)")
+    ap.add_argument("--active-before", default=None, metavar="DATE",
+                    help="keep only users last publicly active before this "
+                         "ISO date")
     ap.add_argument("--out", default=str(SCRIPT_DIR / "users.jsonl"),
                     help="output JSONL (resumable)")
     ap.add_argument("--skipped", default=str(SCRIPT_DIR / "skipped.jsonl"),
@@ -726,6 +785,19 @@ def main() -> int:
               "ignoring the gender filter.", file=sys.stderr)
         genders = None
 
+    # Joined / last-active calendar windows. A typo'd date should stop the run
+    # loudly, not silently scrape the whole world.
+    date_bounds = {}
+    for flag in ("joined_after", "joined_before",
+                 "active_after", "active_before"):
+        raw = getattr(args, flag)
+        ts = date_ts(raw) if raw else None
+        if raw and ts is None:
+            print(f"unparseable --{flag.replace('_', '-')} date: {raw!r} "
+                  f"(use ISO, e.g. 2024-01-01)", file=sys.stderr)
+            return 2
+        date_bounds[flag] = ts
+
     if not TOKEN:
         print("! No GITHUB_TOKEN set: search is 10 req/min and the API 60 req/hr.\n"
               "  Create one at https://github.com/settings/tokens (no scopes needed)\n"
@@ -740,6 +812,14 @@ def main() -> int:
         narrowing.append(f"age>={args.age_min:g}")
     if args.age_max is not None:
         narrowing.append(f"age<{args.age_max:g}")
+    if args.joined_after:
+        narrowing.append(f"joined>={args.joined_after}")
+    if args.joined_before:
+        narrowing.append(f"joined<{args.joined_before}")
+    if args.active_after:
+        narrowing.append(f"active>={args.active_after}")
+    if args.active_before:
+        narrowing.append(f"active<{args.active_before}")
     if genders:
         narrowing.append(f"gender={','.join(sorted(genders))}")
     if narrowing:
@@ -785,6 +865,7 @@ def main() -> int:
                     use_commits=not args.no_commits, use_site=not args.no_site,
                     use_readme=not args.no_readme, countries=countries,
                     age_min=args.age_min, age_max=args.age_max, genders=genders,
+                    **date_bounds,
                 )
             except RateLimited as e:
                 done.add(login)

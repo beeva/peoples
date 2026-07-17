@@ -9,10 +9,11 @@ import {
 // Re-export the filter model so server-side callers can keep importing it from
 // "@/lib/emails"; the client imports it straight from "@/lib/filters" (which has
 // no server-only guard).
-export type { AgeOp, CountryFacet, FacetFilter, Facets } from "./filters";
+export type { AgeOp, CountryFacet, DateOp, FacetFilter, Facets } from "./filters";
 export {
   ageActive,
   ageToRange,
+  dateActive,
   EMPTY_FILTER,
   hasActiveFilter,
   parseFilter,
@@ -205,6 +206,7 @@ interface RawResponse {
     countries?: { name?: string; code?: string; count?: number }[];
     genders?: { male?: number; female?: number; unknown?: number };
     ages?: Record<string, number>;
+    runs?: { run?: number; count?: number }[];
   };
   stats?: RawStats;
   sources?: RawSource[];
@@ -314,9 +316,18 @@ export async function fetchEmails(
   if (messaged !== "all") params.set("messaged", messaged);
   if (filter.countries.length) params.set("country", filter.countries.join(","));
   if (filter.genders.length) params.set("gender", filter.genders.join(","));
+  if (filter.runs.length) params.set("runs", filter.runs.join(","));
   const { min, max } = ageToRange(filter);
   if (min) params.set("age_min", min);
   if (max) params.set("age_max", max);
+  if (filter.joinedOp && filter.joinedDate) {
+    params.set("joined_op", filter.joinedOp);
+    params.set("joined_date", filter.joinedDate);
+  }
+  if (filter.activeOp && filter.activeDate) {
+    params.set("active_op", filter.activeOp);
+    params.set("active_date", filter.activeDate);
+  }
 
   const url = `${API_BASE_URL}/api/emails?${params.toString()}`;
 
@@ -372,6 +383,7 @@ const EMPTY_FACETS: Facets = {
   countries: [],
   genders: { male: 0, female: 0, unknown: 0 },
   ages: {},
+  runs: [],
 };
 
 function mapFacets(f: RawResponse["facets"]): Facets {
@@ -389,6 +401,9 @@ function mapFacets(f: RawResponse["facets"]): Facets {
       unknown: f?.genders?.unknown ?? 0,
     },
     ages: f?.ages ?? {},
+    runs: (f?.runs ?? [])
+      .map((r) => ({ run: r.run ?? 0, count: r.count ?? 0 }))
+      .filter((r) => r.run > 0),
   };
 }
 

@@ -1,35 +1,44 @@
 :root {
-  /* Dark: near-black with a faint cool cast, layered surfaces that read as
-     depth without heavy shadow. One confident accent, no competing hues. */
-  --bg: #0a0b0f;
-  --bg-soft: #0e1015;
-  --surface: #14161d;
-  --surface-2: #191c25;
-  --border: #23262f;
-  --border-soft: #1b1e26;
+  /* ==== Contact Directory Design System v1.0 — tokens ====
+     Dark-first. Background/Surface/Card/Border ladder from the spec; one
+     violet primary (500/600/700) plus the four semantic hues. The TS mirrors
+     of these values live in web/design-system/tokens/. */
+  --bg: #080a10; /* Background */
+  --bg-soft: #0c0f17;
+  --surface: #111520; /* Surface */
+  --surface-2: #161b27; /* Card */
+  --border: #252b3a; /* Border */
+  --border-soft: #1c2230;
   --text: #edf0f6;
   --text-dim: #9ba3b4;
   --text-faint: #656d7e;
-  --accent: #6b9bff;
-  --accent-strong: #4d84ff;
+  --accent: #7c5cff; /* Primary 500 */
+  --accent-strong: #6546e8; /* Primary 600 */
+  --accent-deep: #5234c7; /* Primary 700 */
   --accent-2: #9d7bff;
-  --accent-grad: linear-gradient(135deg, #6b9bff 0%, #9d7bff 100%);
+  --accent-grad: linear-gradient(135deg, #7c5cff 0%, #5234c7 100%);
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
-  --good: #34d399;
+  --good: #22c55e; /* Success */
   --good-soft: color-mix(in srgb, var(--good) 14%, transparent);
+  --warn: #f59e0b; /* Warning */
+  --error: #ef4444; /* Error */
+  --info: #3b82f6; /* Info */
 
+  /* Elevation: level 1 cards / level 2 dropdowns / level 3 modal+drawer. */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.28);
-  --shadow-lg: 0 18px 50px rgba(0, 0, 0, 0.45);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25);
+  --shadow-lg: 0 18px 50px rgba(0, 0, 0, 0.5);
   --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 32%, transparent);
 
-  --radius: 14px;
-  --radius-sm: 9px;
-  --radius-lg: 20px;
+  /* Radius scale: small 6 / medium 10 / large 16 / pill. */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
   --radius-pill: 999px;
 }
 :root[data-theme="light"] {
-  /* Light: soft paper, not stark white; cool neutral borders. */
+  /* Light: soft paper, not stark white; the primary shifts one step darker
+     (600/700) so violet keeps contrast on white. */
   --bg: #f6f7fb;
   --bg-soft: #eef1f7;
   --surface: #ffffff;
@@ -39,14 +48,18 @@
   --text: #12151c;
   --text-dim: #565f70;
   --text-faint: #8b93a3;
-  --accent: #3b6fe0;
-  --accent-strong: #2b5cd0;
+  --accent: #6546e8; /* Primary 600 */
+  --accent-strong: #5234c7; /* Primary 700 */
+  --accent-deep: #5234c7;
   --accent-2: #7c5cf0;
-  --good: #12a670;
+  --good: #16a34a;
   --good-soft: color-mix(in srgb, var(--good) 12%, transparent);
+  --warn: #d97706;
+  --error: #dc2626;
+  --info: #2563eb;
 
   --shadow-sm: 0 1px 2px rgba(30, 45, 90, 0.06);
-  --shadow-md: 0 6px 20px rgba(30, 45, 90, 0.08);
+  --shadow-md: 0 4px 12px rgba(30, 45, 90, 0.08);
   --shadow-lg: 0 18px 50px rgba(30, 45, 90, 0.14);
 }
 
@@ -191,10 +204,11 @@ a:hover {
   margin-bottom: 30px;
 }
 .stat {
-  background: var(--surface);
+  background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 18px 20px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: 24px; /* card padding — 8px grid */
   position: relative;
   overflow: hidden;
   transition:
@@ -324,17 +338,17 @@ a:hover {
   gap: 6px;
   padding: 9px 14px;
   border-radius: 999px;
-  border: 1px solid color-mix(in srgb, #f87171 45%, var(--border));
-  background: color-mix(in srgb, #f87171 12%, var(--surface));
-  color: #f87171;
+  border: 1px solid color-mix(in srgb, var(--error) 45%, var(--border));
+  background: color-mix(in srgb, var(--error) 12%, var(--surface));
+  color: var(--error);
   font-size: 13.5px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.16s ease;
 }
 .stop-btn:hover {
-  border-color: #f87171;
-  background: color-mix(in srgb, #f87171 20%, var(--surface));
+  border-color: var(--error);
+  background: color-mix(in srgb, var(--error) 20%, var(--surface));
 }
 .stop-btn svg {
   width: 12px;
@@ -348,10 +362,10 @@ a:hover {
   color: var(--accent);
 }
 .rescrape-status[data-state="error"] {
-  color: #f87171;
+  color: var(--error);
 }
 .rescrape-status[data-state="stopped"] {
-  color: #fbbf24;
+  color: var(--warn);
 }
 .rescrape-status[data-state="done"] {
   color: var(--good);
@@ -473,33 +487,119 @@ a:hover {
   color: inherit;
 }
 
-/* ---------- Country / gender / age filters ---------- */
+/* ---------- Country / gender / step / age filters ----------
+   One labelled row per condition: every group gets the full panel width, so
+   the country list wraps in place instead of fighting for a side column. */
 .facet-filters {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 12px 26px;
+  flex-direction: column;
+  gap: 12px;
   margin-bottom: 24px;
   padding: 16px 18px;
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   background: var(--surface);
   box-shadow: var(--shadow-sm);
 }
+.facet-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.facet-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 680;
+}
+.facet-title svg {
+  width: 14px;
+  height: 14px;
+  color: var(--accent);
+  flex: none;
+}
+/* "3" — how many conditions are currently on. */
+.facet-active-n {
+  font-size: 10.5px;
+  font-weight: 700;
+  min-width: 18px;
+  text-align: center;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: #fff;
+}
+.facet-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.facet-row > .facet-label {
+  flex: none;
+  width: 96px;
+  padding-top: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.facet-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+/* Inline group label within a shared row ("Joined", "Last active"). A left
+   margin separates it from the previous group; wrap drops it to 0 on narrow
+   screens via the row gap. */
+.facet-label-inline {
+  margin-left: 18px;
+  padding-top: 0 !important;
+}
+.facet-date {
+  padding: 7px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+}
+.facet-date:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.facet-date:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.facet-search {
+  flex-basis: 100%;
+  max-width: 280px;
+  padding: 7px 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.facet-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 /* Tells the reader this panel also scopes the scrape, not just the view. */
 .facet-hint {
-  flex-basis: 100%;
   display: flex;
   align-items: center;
   gap: 7px;
   font-size: 12px;
   color: var(--text-dim);
-}
-.facet-hint svg {
-  width: 13px;
-  height: 13px;
-  color: var(--accent);
-  flex: none;
 }
 .facet-hint strong {
   color: var(--text);
@@ -579,17 +679,14 @@ a:hover {
   font-size: 12.5px;
   color: var(--text-dim);
 }
-/* Countries can be many; keep them in a bounded, scrollable strip. */
-.facet-countries {
-  align-items: flex-start;
-  flex: 1 1 340px;
-  min-width: 260px;
-}
+/* Countries can be many; keep them in a bounded, scrollable strip that
+   spans the full row under the search box. */
 .facet-country-scroll {
+  flex-basis: 100%;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  max-height: 96px;
+  max-height: 118px;
   overflow-y: auto;
   padding: 2px;
 }
@@ -921,9 +1018,9 @@ select.sort:hover {
   font-weight: 650;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  color: #4ade80;
-  background: color-mix(in srgb, #4ade80 14%, transparent);
-  border: 1px solid color-mix(in srgb, #4ade80 40%, transparent);
+  color: var(--good);
+  background: color-mix(in srgb, var(--good) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--good) 40%, transparent);
   vertical-align: middle;
 }
 /* Account age, under the activity date (GitHub rows) and in the detail meta. */
@@ -975,8 +1072,8 @@ select.sort:hover {
 }
 .gender-badge[data-gender="male"] {
   color: #2563eb;
-  border-color: color-mix(in srgb, #3b82f6 50%, transparent);
-  background: color-mix(in srgb, #3b82f6 16%, transparent);
+  border-color: color-mix(in srgb, var(--info) 50%, transparent);
+  background: color-mix(in srgb, var(--info) 16%, transparent);
 }
 .gender-badge[data-gender="female"] {
   color: #db2777;
@@ -1103,14 +1200,14 @@ select.sort:hover {
   background: color-mix(in srgb, #b794f6 12%, transparent);
 }
 .src-badge[data-source="aboutme"] {
-  color: #4ade80;
-  border-color: color-mix(in srgb, #4ade80 45%, transparent);
-  background: color-mix(in srgb, #4ade80 12%, transparent);
+  color: var(--good);
+  border-color: color-mix(in srgb, var(--good) 45%, transparent);
+  background: color-mix(in srgb, var(--good) 12%, transparent);
 }
 .src-badge[data-source="github"] {
-  color: #fbbf24;
-  border-color: color-mix(in srgb, #fbbf24 45%, transparent);
-  background: color-mix(in srgb, #fbbf24 12%, transparent);
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
 }
 
 /* ---------- Manual sent/unsent checkbox ---------- */
@@ -1439,15 +1536,15 @@ mark {
   padding: 14px 18px;
   margin-bottom: 18px;
   border-radius: var(--radius-sm);
-  background: color-mix(in srgb, #f87171 14%, var(--surface));
-  border: 1px solid color-mix(in srgb, #f87171 45%, transparent);
+  background: color-mix(in srgb, var(--error) 14%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--error) 45%, transparent);
   color: var(--text);
   font-size: 13.5px;
 }
 .banner svg {
   width: 20px;
   height: 20px;
-  color: #f87171;
+  color: var(--error);
   flex: none;
 }
 .banner code {
@@ -1599,7 +1696,7 @@ mark {
 .modal {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 18px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
   width: 100%;
   max-width: 560px;
@@ -1697,7 +1794,8 @@ mark {
   background: var(--accent);
   color: #fff;
   cursor: pointer;
-  border-radius: 10px;
+  border-radius: var(--radius);
+  min-height: 40px; /* button height — 8px grid */
   padding: 9px 18px;
   font-size: 13.5px;
   font-weight: 600;
@@ -1710,7 +1808,8 @@ mark {
   background: var(--surface-2);
   color: var(--text);
   cursor: pointer;
-  border-radius: 10px;
+  border-radius: var(--radius);
+  min-height: 40px; /* button height — 8px grid */
   padding: 9px 16px;
   font-size: 13.5px;
 }
@@ -1723,7 +1822,7 @@ mark {
   color: var(--text-dim);
 }
 .msg-status[data-state="error"] {
-  color: #f87171;
+  color: var(--error);
 }
 .msg-status[data-state="done"] {
   color: var(--good);
@@ -2245,6 +2344,139 @@ img.avatar {
   color: var(--text-dim);
 }
 .export-sent {
-  color: var(--good, #4ade80);
+  color: var(--good);
   font-weight: 600;
+}
+
+/* ---------- App shell: sidebar + content (Design System v1.0 §7) ---------- */
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+.app-content {
+  flex: 1;
+  min-width: 0; /* let tables shrink instead of overflowing the shell */
+}
+.sidebar {
+  width: 240px;
+  flex: none;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-right: 1px solid var(--border-soft);
+}
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  color: var(--text);
+  border-bottom: 1px solid var(--border-soft);
+}
+.sidebar-brand:hover {
+  color: var(--text);
+}
+.sidebar-brand-name {
+  font-size: 14.5px;
+  font-weight: 680;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+.sidebar-nav {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.sidebar-section {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 0 10px;
+  margin-bottom: 6px;
+}
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  margin: 1px 0;
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-size: 13.5px;
+  font-weight: 550;
+  white-space: nowrap;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+.sidebar-item svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+.sidebar-item span:not(.sidebar-soon) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sidebar-item:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.sidebar-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 620;
+}
+.sidebar-item.disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+.sidebar-item.disabled:hover {
+  background: none;
+  color: var(--text-faint);
+}
+.sidebar-soon {
+  margin-left: auto;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+}
+.sidebar-foot {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* Tablet: icon rail. Labels, section titles and chips fold away. */
+@media (max-width: 1024px) {
+  .sidebar {
+    width: 64px;
+  }
+  .sidebar-brand {
+    justify-content: center;
+    padding: 14px 8px;
+  }
+  .sidebar-brand-name,
+  .sidebar-section,
+  .sidebar-soon,
+  .sidebar-item span:not(.sidebar-soon),
+  .sidebar-foot {
+    display: none;
+  }
+  .sidebar-item {
+    justify-content: center;
+    padding: 11px 0;
+  }
 }
