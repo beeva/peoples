@@ -92,6 +92,7 @@ GET  /api/stats?source=...
 POST /api/scrape?source=discourse|devto|aboutme|github[&pages=&limit=&regions=&full=1]  # start a re-scrape
 POST /api/scrape/stop?source=...                                         # stop a running job
 GET  /api/scrape/status?source=...                                       # poll a job (live added count)
+POST /api/runs/merge   {"source":"github","from":[5],"into":3}           # fold one step into another
 ```
 
 `source` defaults to `all`. Each `/api/emails` response also returns the
@@ -134,6 +135,21 @@ topics. (Pass `full=1` to dev.to, or delete `state.json`, to rebuild from scratc
 so each click returns promptly; click again to continue where it left off. Pass
 `pages` / `limit` query params to override, or `full=1` (dev.to) to rebuild from
 scratch. Run a scraper directly (see above) for an unbounded crawl.
+
+### Merging steps
+
+Every GitHub contact records the scrape run (**step**) that found it, and the
+**Step** filter lists them. Two runs are often really one piece of work — a run
+that stopped half way and the one that finished it — so the Step row has a
+**Merge steps…** control: pick the run to fold away and the run to keep, confirm,
+and every contact of the first is relabelled as the second.
+
+Only the step label changes; no contact is added, removed or altered. The
+rewrite happens in `scrapers/github/users.jsonl` (and its `users.json` mirror),
+with the previous file kept beside it as `users.jsonl.bak` — nothing else
+remembers which run a contact originally arrived on. Merging is refused while a
+scrape of that source is running, since the scraper is appending to the same
+file.
 
 ### Prerequisites
 

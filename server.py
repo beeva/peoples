@@ -49,7 +49,7 @@ SCRAPERS_DIR = BASE_DIR / "scrapers"
 # load also means records scraped before the rule existed are ordered correctly
 # without re-scraping them.
 sys.path.insert(0, str(SCRAPERS_DIR))
-from common import personal_first  # noqa: E402
+from common import personal_first, write_json_array  # noqa: E402
 STATE_FILE = SCRAPERS_DIR / "state.json"
 MAX_PER_PAGE = 100
 
@@ -934,6 +934,117 @@ def _job_view(key: str) -> dict:
     return view
 
 
+# ---- merging scrape runs --------------------------------------------------
+# A "step" is the scrape run that found a contact. Runs are only numbered by
+# sources that record a `run` field, and each such source keeps its data in one
+# JSONL file plus the pretty JSON mirror the scraper writes beside it.
+RUN_FILES = {"github": (GITHUB_FILE, GITHUB_FILE.with_suffix(".json"))}
+MERGE_LOCK = threading.Lock()
+
+
+def _rec_run(d: dict) -> int:
+    """A raw record's run number. Records written before runs were numbered have
+    no field and count as run 1 -- the same rule the loader and the scraper's
+    own `_next_run` apply."""
+    return _to_int(str(d.get("run", "")), 1)
+
+
+def run_counts(key: str) -> list[dict]:
+    """[{run, count}] for one source, straight from disk, lowest run first."""
+    path = (RUN_FILES.get(key) or (None,))[0]
+    if path is None:
+        return []
+    counts: dict[int, int] = {}
+    for d in _read_jsonl(path):
+        r = _rec_run(d)
+        counts[r] = counts.get(r, 0) + 1
+    return [{"run": r, "count": c} for r, c in sorted(counts.items())]
+
+
+def merge_runs(key: str, from_runs: list[int], into: int) -> dict:
+    """Relabel every contact collected on `from_runs` as belonging to `into`.
+
+    Two scrapes that were really one piece of work (a run that died half way and
+    the one that finished it) should read as one step. The run number lives on
+    the scraped record, so merging rewrites the source file in place -- the
+    previous contents are kept alongside as `.bak` because nothing else
+    remembers which run a contact originally came in on.
+
+    Merging never touches the contacts themselves, only their step label.
+    """
+    entry = RUN_FILES.get(key)
+    if entry is None:
+        return {"ok": False, "status": 400,
+                "error": f"'{key or 'all'}' does not number its scrape runs"}
+    if into <= 0:
+        return {"ok": False, "status": 400, "error": "pick a run to merge into"}
+    wanted = {r for r in from_runs if r > 0 and r != into}
+    if not wanted:
+        return {"ok": False, "status": 400,
+                "error": "pick a different run to merge in"}
+
+    # The scraper appends to this file as it goes; rewriting it underneath a
+    # live run would lose whatever it wrote in between.
+    with JOBS_LOCK:
+        job = JOBS.get(key)
+        if job and job.get("status") == "running":
+            return {"ok": False, "status": 409,
+                    "error": "a scrape is running -- stop it first"}
+
+    path, mirror = entry
+    with MERGE_LOCK:
+        if not path.exists():
+            return {"ok": False, "status": 404,
+                    "error": f"no data file for '{key}' yet"}
+        # Line by line, so a line we cannot parse is carried over untouched
+        # rather than silently dropped by the rewrite.
+        out: list[str] = []
+        moved = 0
+        present: set[int] = set()
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    d = json.loads(stripped)
+                except json.JSONDecodeError:
+                    out.append(stripped)
+                    continue
+                run = _rec_run(d)
+                present.add(run)
+                if run in wanted:
+                    d["run"] = into
+                    moved += 1
+                out.append(json.dumps(d, ensure_ascii=False))
+
+        missing = sorted(wanted - present)
+        if into not in present:
+            return {"ok": False, "status": 404,
+                    "error": f"run {into} has no contacts"}
+        if missing:
+            return {"ok": False, "status": 404,
+                    "error": "no contacts on run "
+                             + ", ".join(str(m) for m in missing)}
+
+        try:
+            backup = path.with_suffix(path.suffix + ".bak")
+            backup.write_bytes(path.read_bytes())
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
+            tmp.replace(path)  # atomic swap, so a crash cannot truncate the data
+            if mirror.exists():
+                write_json_array(str(path), str(mirror))
+        except OSError as e:
+            return {"ok": False, "status": 500,
+                    "error": f"could not rewrite {path.name}: {e}"}
+
+    total = reload_source(key)
+    return {"ok": True, "moved": moved, "into": into,
+            "merged": sorted(wanted), "total": total,
+            "runs": run_counts(key)}
+
+
 # ---- query ----------------------------------------------------------------
 def detail_record(rec_id: str) -> dict | None:
     """Full view of one merged contact: public fields + every post's full text."""
@@ -1401,6 +1512,13 @@ def query_records(source: str, q: str, sort: str, page: int, per_page: int,
             source = "all"
             items = ALL_RECORDS
 
+        # Which scrape runs actually exist in this source, judged over the whole
+        # set (before search narrows it). Used to drop a step filter that points
+        # at a run which no longer exists -- e.g. one merged away, leaving a
+        # stale `runs=` in the URL -- so a phantom step falls back to "all"
+        # instead of hiding every contact the user never knowingly filtered out.
+        source_runs = {(r.get("run") or 0) for r in items}
+
         q = (q or "").strip().lower()
         if q:
             terms = q.split()
@@ -1440,10 +1558,12 @@ def query_records(source: str, q: str, sort: str, page: int, per_page: int,
                      if ((r.get("gender") or "").strip().lower() or "unknown")
                      in wanted_genders]
 
-        # Step (scrape run number): comma-separated, any-of.
+        # Step (scrape run number): comma-separated, any-of. Runs that no longer
+        # exist in the data are dropped (see source_runs above), so a stale
+        # selection self-heals to "no step filter" rather than emptying the list.
         wanted_runs = {_to_int(x.strip(), -1)
                        for x in (runs or "").split(",") if x.strip()}
-        wanted_runs.discard(-1)
+        wanted_runs &= source_runs
         if wanted_runs:
             items = [r for r in items if (r.get("run") or 0) in wanted_runs]
 
@@ -1647,7 +1767,7 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/emails", "/api/email?id=", "/api/export", "/api/stats",
                     "/api/scrape", "/api/scrape/status", "/api/scrape/stop",
                     "/api/message/generate", "/api/message/send",
-                    "/api/message/mark",
+                    "/api/message/mark", "/api/runs/merge",
                 ],
             })
             return
@@ -1775,6 +1895,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "to": to_addr})
             except Exception as e:  # noqa: BLE001
                 self._send_json({"ok": False, "error": str(e)}, 502)
+            return
+
+        if parsed.path == "/api/runs/merge":
+            data = self._read_json_body()
+            raw = data.get("from")
+            if not isinstance(raw, list):
+                raw = [raw]
+            result = merge_runs(
+                source or str(data.get("source") or ""),
+                [_to_int(str(x), 0) for x in raw],
+                _to_int(str(data.get("into")), 0),
+            )
+            status = result.pop("status", 200)
+            self._send_json(result, status=status)
             return
 
         if parsed.path == "/api/scrape":

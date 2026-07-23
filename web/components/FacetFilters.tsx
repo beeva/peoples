@@ -5,6 +5,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { AgeOp, DateOp, FacetFilter, Facets } from "@/lib/filters";
 import { dateActive, hasActiveFilter } from "@/lib/filters";
 import { flagEmoji } from "@/lib/display";
+import MergeRuns from "./MergeRuns";
 
 const GENDERS: { key: "male" | "female" | "unknown"; label: string }[] = [
   { key: "male", label: "Male" },
@@ -32,12 +33,17 @@ export default function FacetFilters({
   filter,
   facets,
   showAge = true,
+  mergeSource = "",
 }: {
   filter: FacetFilter;
   facets: Facets;
   /** Account age only means "years on GitHub" for the GitHub source; other
    *  sources' dates are post dates, so the age control is hidden for them. */
   showAge?: boolean;
+  /** Source whose steps can be merged, or "" to hide the control. Merging
+   *  rewrites one source's data file, so it is offered only when that single
+   *  source is the one on screen -- not under "All". */
+  mergeSource?: string;
 }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -329,6 +335,9 @@ export default function FacetFilters({
                 </label>
               );
             })}
+            {mergeSource && (
+              <MergeRuns source={mergeSource} runs={facets.runs} />
+            )}
           </div>
         </div>
       )}

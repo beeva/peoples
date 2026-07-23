@@ -18,6 +18,9 @@ scrapers/state.json
 scrapers/**/.cursor
 scrapers/enrich_cache.json
 scrapers/sent.json
+# Pre-merge copy of a scraped file, written when two steps are merged
+*.jsonl.bak
+*.jsonl.tmp
 
 # Local env
 .env

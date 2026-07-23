@@ -70,7 +70,9 @@ export default async function Home({
   // Keep the active country/gender/age filter in pagination and sort links.
   if (filter.countries.length) baseParams.country = filter.countries.join(",");
   if (filter.genders.length) baseParams.gender = filter.genders.join(",");
-  if (filter.runs.length) baseParams.runs = filter.runs.join(",");
+  // Use the runs the server actually applied, not the raw URL value: a step that
+  // was merged away is dropped, so links don't re-add a phantom `runs=` filter.
+  if (result.filter.runs.length) baseParams.runs = result.filter.runs.join(",");
   if (ageActive(filter)) {
     baseParams.age_op = filter.ageOp;
     baseParams.age = filter.ageValue;
@@ -148,6 +150,7 @@ export default async function Home({
           filter={result.filter}
           facets={result.facets}
           showAge={result.source === "github"}
+          mergeSource={result.source === "github" ? "github" : ""}
         />
 
         {result.error && (

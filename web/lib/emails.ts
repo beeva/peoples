@@ -200,6 +200,7 @@ interface RawResponse {
   messaged_counts?: { all?: number; sent?: number; unsent?: number };
   country?: string;
   gender?: string;
+  runs?: string;
   age_min?: string;
   age_max?: string;
   facets?: {
@@ -296,6 +297,14 @@ export function isSortKey(value: string | undefined): value is SortKey {
   return !!value && (SORT_KEYS as readonly string[]).includes(value);
 }
 
+/** Parse the server's echoed `runs` (a comma list of ints) back to a list. */
+function parseRuns(v: string | undefined): string[] {
+  return (v ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => /^\d+$/.test(s));
+}
+
 /** Fetch a page of records from the Python data server. */
 export async function fetchEmails(
   source: SourceKey,
@@ -352,8 +361,11 @@ export async function fetchEmails(
       },
       // Echo the selection the caller asked for -- the server round-trips
       // country/gender but not the age *operator* (it only knows min/max), so
-      // the client filter is the source of truth for the age comparison.
-      filter,
+      // the client filter is the source of truth for the age comparison. Runs
+      // are the exception: the server drops step numbers that no longer exist
+      // (a run merged away leaves a stale `runs=` in the URL), so trust its
+      // reconciled list to keep the facet count and links honest.
+      filter: { ...filter, runs: parseRuns(data.runs) },
       facets: mapFacets(data.facets),
       stats: mapStats(data.stats),
       sources: mapSources(data.sources),

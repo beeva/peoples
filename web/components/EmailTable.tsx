@@ -12,6 +12,7 @@ import {
 import CopyButton from "./CopyButton";
 import MessageButton from "./MessageButton";
 import SentToggle from "./SentToggle";
+import VisitedLink from "./VisitedLink";
 
 const AVATAR_COLORS: [string, string][] = [
   ["#6ea8fe", "#3b6fd4"],
@@ -157,26 +158,13 @@ function Row({
         {(record.url || record.siteUrl) && (
           <span className="meta-links">
             {record.url && (
-              <a
-                className="meta-link"
+              <VisitedLink
                 href={record.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={record.url}
-              >
-                {SOURCE_LABELS[src] === "GitHub" ? "GitHub" : "Profile"}
-              </a>
+                label={SOURCE_LABELS[src] === "GitHub" ? "GitHub" : "Profile"}
+              />
             )}
             {record.siteUrl && (
-              <a
-                className="meta-link"
-                href={record.siteUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={record.siteUrl}
-              >
-                Portfolio
-              </a>
+              <VisitedLink href={record.siteUrl} label="Portfolio" />
             )}
           </span>
         )}

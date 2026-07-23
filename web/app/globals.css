@@ -717,6 +717,70 @@ a:hover {
   border-color: var(--accent);
   color: var(--text);
 }
+/* Merge steps — sits at the end of the Step row, quiet until opened. */
+.facet-merge-open {
+  padding: 7px 13px;
+  border-radius: var(--radius-pill);
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.16s, color 0.16s;
+}
+.facet-merge-open:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.facet-merge {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft);
+}
+.facet-merge-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.facet-merge-warn {
+  font-size: 12px;
+  color: var(--warn);
+  max-width: 320px;
+}
+.facet-merge-go {
+  padding: 7px 14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.facet-merge-go:hover {
+  filter: brightness(1.08);
+}
+.facet-merge-go.danger {
+  border-color: var(--warn);
+  background: var(--warn);
+  color: #1a1205;
+}
+.facet-merge-go:disabled {
+  opacity: 0.55;
+  cursor: default;
+  filter: none;
+}
+.facet-merge-cancel {
+  margin-left: 0;
+}
 /* Preset goal chips inside the compose modal. */
 .intent-presets {
   display: flex;
@@ -940,12 +1004,35 @@ select.sort:hover {
   white-space: nowrap;
 }
 .contact-table .col-meta .meta-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   color: var(--accent, #6ea8fe);
   text-decoration: none;
   font-weight: 600;
 }
 .contact-table .col-meta .meta-link:hover {
   text-decoration: underline;
+}
+/* A link you have already opened steps back and picks up a tick, so a long
+   list shows at a glance which profiles are still unexplored. */
+.contact-table .col-meta .meta-link[data-visited] {
+  color: var(--text-dim);
+  font-weight: 500;
+}
+.contact-table .col-meta .visited-tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: var(--radius-pill);
+  background: var(--good-soft);
+  color: var(--good);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
 }
 /* Row number — counts across pages (page 2 starts at 51, not 1). */
 .contact-table .col-num {
