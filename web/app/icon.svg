@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Mirrors the `.logo` mark in Sidebar.tsx: the layers glyph on the
+       accent-gradient rounded square. Keep the two in sync.
+       (Avoid double hyphens here: they are illegal inside an XML comment
+       and strict SVG parsers reject the whole file.) -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7c5cff" />
+      <stop offset="1" stop-color="#5234c7" />
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8" fill="url(#g)" />
+  <g transform="translate(5 5) scale(0.9167)"
+     fill="none" stroke="#fff" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 2 2 7l10 5 10-5-10-5Z" />
+    <path d="m2 17 10 5 10-5" />
+    <path d="m2 12 10 5 10-5" />
+  </g>
+</svg>
