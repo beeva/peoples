@@ -11,6 +11,7 @@ interface ExportRow {
   name: string;
   username: string;
   email: string;
+  provider: string; // mailbox bucket: gmail | outlook | hotmail | personal | company
   gender: string;
   country: string;
   run: number; // step (scrape run number)
@@ -22,6 +23,9 @@ interface ExportRow {
 interface ExportOptions {
   runs: { run: number; count: number }[];
   countries: { name: string; code: string; count: number }[];
+  /** Mailbox buckets, in display order, with how many contacts are in each.
+   *  The server owns the keys and labels so both sides can't drift. */
+  providers: { key: string; label: string; count: number }[];
 }
 
 interface ExportData {
@@ -61,16 +65,16 @@ function csvCell(v: string | number): string {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-function buildCsv(rows: ExportRow[]): string {
+function buildCsv(rows: ExportRow[], providerLabel: (key: string) => string): string {
   const header = [
-    "Name", "Username", "Email", "Gender", "Country",
+    "Name", "Username", "Email", "Provider", "Gender", "Country",
     "Step", "Sent", "Joined", "Last Active",
   ];
   const lines = [header.join(",")];
   for (const r of rows) {
     lines.push(
       [
-        r.name, r.username, r.email, r.gender, r.country,
+        r.name, r.username, r.email, providerLabel(r.provider), r.gender, r.country,
         r.run || "", r.messaged ? "yes" : "no", r.created_at, r.activity_at,
       ]
         .map(csvCell)
@@ -103,6 +107,7 @@ export default function ExportButton({
   const [joinedDate, setJoinedDate] = useState("");
   const [statuses, setStatuses] = useState<Set<string>>(new Set());
   const [genders, setGenders] = useState<Set<string>>(new Set());
+  const [providers, setProviders] = useState<Set<string>>(new Set());
   const [runs, setRuns] = useState<Set<number>>(new Set());
   const [countries, setCountries] = useState<Set<string>>(new Set());
   const [countryQuery, setCountryQuery] = useState("");
@@ -138,6 +143,7 @@ export default function ExportButton({
         }
         if (statuses.size) qs.set("messaged", [...statuses].join(","));
         if (genders.size) qs.set("gender", [...genders].join(","));
+        if (providers.size) qs.set("provider", [...providers].join(","));
         if (runs.size) qs.set("runs", [...runs].join(","));
         if (countries.size) qs.set("country", [...countries].join(","));
         const res = await fetch(`/api/export?${qs}`, { cache: "no-store" });
@@ -157,7 +163,7 @@ export default function ExportButton({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, source, count, activeOp, activeDate, joinedOp, joinedDate,
-      statuses, genders, runs, countries, refresh]);
+      statuses, genders, providers, runs, countries, refresh]);
 
   // Close on Escape, like the detail drawer.
   useEffect(() => {
@@ -187,11 +193,19 @@ export default function ExportButton({
     );
   }, [data, countryQuery, countries]);
 
+  /** Bucket key -> human label, straight from the server's option list. */
+  const providerLabel = useMemo(() => {
+    const byKey = new Map(
+      (data?.options.providers ?? []).map((p) => [p.key, p.label]),
+    );
+    return (key: string) => byKey.get(key) || key || "";
+  }, [data]);
+
   function download() {
     const rows = data?.items ?? [];
     if (!rows.length) return;
     // BOM so Excel opens the file as UTF-8 (names carry accents/CJK).
-    const blob = new Blob(["﻿" + buildCsv(rows)], {
+    const blob = new Blob(["﻿" + buildCsv(rows, providerLabel)], {
       type: "text/csv;charset=utf-8",
     });
     const stamp = new Date().toISOString().slice(0, 10);
@@ -373,6 +387,26 @@ export default function ExportButton({
                 </div>
 
                 <div className="export-cond">
+                  <span className="facet-label">Email</span>
+                  {(data?.options.providers ?? []).map((p) => (
+                    <label
+                      key={p.key}
+                      className={`check-pill${providers.has(p.key) ? " on" : ""}`}
+                      title={`Contacts whose main email is a ${p.label} address`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={providers.has(p.key)}
+                        onChange={() => toggle(providers, p.key, setProviders)}
+                      />
+                      <span>{p.label}</span>
+                      <span className="check-count">{p.count.toLocaleString()}</span>
+                    </label>
+                  ))}
+                  {!data && <span className="facet-empty">Loading…</span>}
+                </div>
+
+                <div className="export-cond">
                   <span className="facet-label">Step</span>
                   {(data?.options.runs ?? []).map((r) => (
                     <label
@@ -445,6 +479,7 @@ export default function ExportButton({
                       <th>Name</th>
                       <th>Username</th>
                       <th>Email</th>
+                      <th>Provider</th>
                       <th>Gender</th>
                       <th>Country</th>
                       <th>Step</th>
@@ -460,6 +495,7 @@ export default function ExportButton({
                         <td>{r.name || "—"}</td>
                         <td>{r.username || "—"}</td>
                         <td className="export-email">{r.email}</td>
+                        <td>{providerLabel(r.provider) || "—"}</td>
                         <td>{r.gender || "—"}</td>
                         <td>{r.country || "—"}</td>
                         <td className="col-num">{r.run || "—"}</td>
@@ -472,7 +508,7 @@ export default function ExportButton({
                     ))}
                     {rows.length === 0 && (
                       <tr>
-                        <td colSpan={10} className="export-none">
+                        <td colSpan={11} className="export-none">
                           {loading || !data
                             ? "Loading…"
                             : "No contacts match these conditions."}

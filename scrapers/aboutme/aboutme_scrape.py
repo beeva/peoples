@@ -46,7 +46,8 @@ from pathlib import Path
 
 # Make the shared `common` package importable when run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common import extract_emails, fetch, load_done_keys, write_json_array  # noqa: E402
+from common import extract_emails, fetch  # noqa: E402
+from common.store import RecordStore  # noqa: E402
 
 SITEMAP_INDEX = "https://aboutme-public.s3.amazonaws.com/sitemap/SitemapIndex.xml"
 UA = "Mozilla/5.0 (compatible; aboutme-profile-scraper; polite)"
@@ -238,10 +239,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Scrape public about.me profiles to JSON.")
     ap.add_argument("--limit", type=int, default=0,
                     help="max profiles to keep (0 = no limit, the default).")
-    ap.add_argument("--out", default=str(SCRIPT_DIR / "users.jsonl"),
-                    help="output JSONL (resumable)")
-    ap.add_argument("--json-out", default=str(SCRIPT_DIR / "users.json"),
-                    help="also write a pretty JSON array here (small sets only)")
+    # Profiles go straight into the database, which is also where the resume
+    # set comes from -- there is no output file to name.
     ap.add_argument("--delay", type=float, default=0.3,
                     help="seconds between profile requests (default: 0.3)")
     ap.add_argument("--start-sitemap", default=None,
@@ -260,9 +259,10 @@ def main() -> int:
     if exclude_terms:
         print(f"Filter: excluding locations matching {exclude_terms}", file=sys.stderr)
 
-    done = load_done_keys(args.out, "username")
+    store = RecordStore("aboutme")
+    done = store.done_keys()
     if done:
-        print(f"Resuming: {len(done)} profiles already in {args.out}.", file=sys.stderr)
+        print(f"Resuming: {len(done)} profiles already stored.", file=sys.stderr)
 
     # build the source of usernames
     if args.users:
@@ -272,7 +272,7 @@ def main() -> int:
         urls = iter_profile_urls(args.start_sitemap, args.cursor_out)
 
     kept = scanned = 0
-    with open(args.out, "a", encoding="utf-8") as out:
+    with store as out:
         for url in urls:
             if args.limit and kept >= args.limit:
                 break
@@ -307,10 +307,8 @@ def main() -> int:
                   f"<{rec['email']}>{note}", file=sys.stderr)
             time.sleep(args.delay)
 
-    print(f"\nDone. Kept {kept} matching profiles ({scanned} scanned) -> {args.out}",
-          file=sys.stderr)
-    if args.json_out:
-        write_json_array(args.out, args.json_out)
+    print(f"\nDone. Kept {kept} matching profiles ({scanned} scanned); "
+          f"{store.count()} stored in total.", file=sys.stderr)
     return 0
 
 

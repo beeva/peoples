@@ -72,11 +72,9 @@ from common import (  # noqa: E402
     email_rank,
     extract_emails,
     fetch,
-    iter_jsonl,
-    load_done_keys,
     load_env,
-    write_json_array,
 )
+from common.store import RecordStore, SkipStore  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from regions import ALL_REGIONS, REGIONS, classify, search_terms  # noqa: E402
@@ -614,21 +612,8 @@ def _write_cursor(path: str | None, term: str) -> None:
         pass
 
 
-def _next_run(path: str) -> int:
-    """Which run this is: one past the highest already in the output.
-
-    Every user records the run that found them, so you can see what a given
-    scrape brought in. Records written before this field existed have no `run`
-    and count as run 1 -- so the first scrape after the upgrade is run 2, and
-    the numbering stays honest rather than restarting on top of them.
-    """
-    highest = 0
-    for rec in iter_jsonl(path):
-        try:
-            highest = max(highest, int(rec.get("run") or 1))
-        except (TypeError, ValueError):
-            highest = max(highest, 1)
-    return highest + 1
+# Which run a scrape is, and who has already been seen, now come from the
+# database -- see RecordStore.next_run() / .done_keys().
 
 
 def _walk_plan(terms) -> list[tuple[str, str, dict]]:
@@ -732,14 +717,12 @@ def main() -> int:
     ap.add_argument("--active-before", default=None, metavar="DATE",
                     help="keep only users last publicly active before this "
                          "ISO date")
-    ap.add_argument("--out", default=str(SCRIPT_DIR / "users.jsonl"),
-                    help="output JSONL (resumable)")
-    ap.add_argument("--skipped", default=str(SCRIPT_DIR / "skipped.jsonl"),
-                    help="JSONL of users already ruled out (no email, off-region, "
-                         "an org), so later runs do not re-fetch them. Delete it "
-                         "to re-examine them; '' to not keep one")
-    ap.add_argument("--json-out", default=str(SCRIPT_DIR / "users.json"),
-                    help="also write a pretty JSON array here (small sets only)")
+    # Users go straight into the database (the `records` table), which is also
+    # where the resume set comes from -- there is no output file to name.
+    ap.add_argument("--skipped", default="1",
+                    help="remember users ruled out (no email, off-region, an "
+                         "org) in the `skipped` table so later runs do not "
+                         "re-fetch them. '' to not remember them")
     ap.add_argument("--delay", type=float, default=0.5,
                     help="seconds between users (default: 0.5)")
     ap.add_argument("--search-delay", type=float, default=2.2,
@@ -826,35 +809,36 @@ def main() -> int:
         print(f"Filters: {'; '.join(narrowing)}", file=sys.stderr)
     print("Only users with at least one discoverable email are kept.", file=sys.stderr)
 
-    done = load_done_keys(args.out, "login")
-    already = len(done)                 # users the output already holds
+    store = RecordStore("github")
+    done = store.done_keys()
+    already = len(done)                 # users the archive already holds
     if done:
-        print(f"Resuming: {already} users already in {args.out}.", file=sys.stderr)
+        print(f"Resuming: {already} users already stored.", file=sys.stderr)
 
     # Everyone we have already looked at and turned down. Without this the next
     # run re-fetches every one of them -- 3-5 API calls each, and most people
     # scanned are turned down -- to reach the same verdict. Remembering the
-    # verdict is what makes a second run cheap. Delete the file to re-examine
-    # them (worth doing after widening the regions, or if you want to recheck
+    # verdict is what makes a second run cheap. Clear the `skipped` table to
+    # re-examine them (worth doing after widening the regions, or to recheck
     # people who had no public email at the time).
-    skipped = load_done_keys(args.skipped, "login") if args.skipped else set()
+    skips = SkipStore("github") if args.skipped else None
+    skipped = skips.keys() if skips else set()
     if skipped:
-        print(f"Skipping: {len(skipped)} users already ruled out "
-              f"({args.skipped}).", file=sys.stderr)
+        print(f"Skipping: {len(skipped)} users already ruled out.",
+              file=sys.stderr)
     done |= skipped
     if args.target and already >= args.target:
         print(f"Target of {args.target} users already met -- nothing to do.",
               file=sys.stderr)
         return 0
 
-    run_no = _next_run(args.out)
+    run_no = store.next_run()
     print(f"This is run #{run_no} -- users it finds are tagged with it.",
           file=sys.stderr)
 
     kept = scanned = ruled_out = 0
     stop = False
-    skips = open(args.skipped, "a", encoding="utf-8") if args.skipped else None
-    with open(args.out, "a", encoding="utf-8") as out:
+    with store as out:
 
         def keep(login: str) -> bool:
             """Scrape one login and append it if it survives the filters."""
@@ -985,13 +969,11 @@ def main() -> int:
     if skips:
         skips.close()
 
-    print(f"\nDone. Kept {kept} users with emails ({scanned} scanned) -> {args.out}",
-          file=sys.stderr)
-    if args.skipped and ruled_out > 0:
-        print(f"      {ruled_out} ruled out -> {args.skipped} "
+    print(f"\nDone. Kept {kept} users with emails ({scanned} scanned); "
+          f"{store.count()} stored in total.", file=sys.stderr)
+    if skips and ruled_out > 0:
+        print(f"      {ruled_out} ruled out and remembered "
               f"(a later run will not re-fetch them)", file=sys.stderr)
-    if args.json_out:
-        write_json_array(args.out, args.json_out)
     return 0
 
 

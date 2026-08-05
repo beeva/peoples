@@ -34,7 +34,8 @@ from pathlib import Path
 
 # Make the shared `common` package importable when run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common import extract_emails, fetch, load_done_keys  # noqa: E402
+from common import extract_emails, fetch  # noqa: E402
+from common.store import RecordStore  # noqa: E402
 
 DEFAULT_BASE = "https://discourse.threejs.org"
 UA = "discourse-post-scraper (polite; contact via forum)"
@@ -177,10 +178,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Scrape all posts from a Discourse forum.")
     default_dir = SCRIPT_DIR / DEFAULT_SITE
     ap.add_argument("--base", default=DEFAULT_BASE, help=f"forum base URL (default: {DEFAULT_BASE})")
-    ap.add_argument("--out", default=str(default_dir / f"{DEFAULT_SITE}_posts.jsonl"),
-                    help="output JSONL file (all posts)")
-    ap.add_argument("--emails-out", default=str(default_dir / f"{DEFAULT_SITE}_emails.jsonl"),
-                    help="output JSONL file (only posts that contain an email)")
+    # Posts that carry an email go straight into the database; the rest are
+    # not kept, which is what the file-based version did in practice too.
     ap.add_argument("--limit", type=int, default=0, help="max topics to scrape (0 = all)")
     ap.add_argument("--delay", type=float, default=0.5, help="seconds between requests (default: 0.5)")
     ap.add_argument("--batch", type=int, default=50, help="post ids per batch request (default: 50)")
@@ -191,34 +190,26 @@ def main() -> int:
     args = ap.parse_args()
     base = args.base.rstrip("/")
 
-    # Make sure the output directory exists (e.g. threejs/).
-    for path in (args.out, args.emails_out):
-        parent = os.path.dirname(path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-
     print(f"Enumerating topics from {base}/sitemap.xml ...", file=sys.stderr)
     topic_ids = enumerate_topic_ids(base)
     print(f"Found {len(topic_ids)} topics.", file=sys.stderr)
 
-    # Resume = skip topics we've already handled. Two independent guards:
-    #  * --since-topic-id: a high-water-mark checkpoint (topic ids are monotonic
-    #    on Discourse, so "id > cursor" reliably means "not yet scraped").
-    #  * the posts file (if present): exact set of done topic ids.
-    done = load_done_keys(args.out, "topic_id")
-    # post ids already in the emails file -> never write a contact twice.
-    done_posts = load_done_keys(args.emails_out, "post_id")
-    todo = [tid for tid in topic_ids if tid > args.since_topic_id and tid not in done]
+    # Resume = skip topics we have already handled. --since-topic-id is a
+    # high-water mark (topic ids are monotonic on Discourse, so "id > cursor"
+    # reliably means "not yet scraped"); the post ids already stored are the
+    # exact guard against recording the same contact twice.
+    store = RecordStore("discourse")
+    done_posts = {str(k) for k in store.done_keys()}
+    todo = [tid for tid in topic_ids if tid > args.since_topic_id]
     if args.limit > 0:
         todo = todo[:args.limit]
     print(f"Resuming after topic_id={args.since_topic_id} "
-          f"({len(done)} in posts file, {len(done_posts)} contacts known); "
-          f"scraping {len(todo)} topics -> {args.out}", file=sys.stderr)
+          f"({len(done_posts)} contacts already stored); "
+          f"scraping {len(todo)} topics", file=sys.stderr)
 
     cursor = args.since_topic_id
     scraped = posts_total = contacts_total = 0
-    with open(args.out, "a", encoding="utf-8") as out, \
-            open(args.emails_out, "a", encoding="utf-8") as eout:
+    with store as eout:
         for i, tid in enumerate(todo, 1):
             try:
                 rec = scrape_topic(base, tid, args.batch, args.delay)
@@ -229,20 +220,19 @@ def main() -> int:
             if not rec:
                 print(f"  [{i}/{len(todo)}] - topic {tid}: skipped (deleted/empty)", file=sys.stderr)
             else:
-                out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                out.flush()
                 scraped += 1
                 posts_total += len(rec["posts"])
 
                 new_contacts = 0
                 for c in build_contacts(base, rec):
-                    if c["post_id"] in done_posts:
+                    # Stored ids are strings (the scraper key), so compare as
+                    # strings -- a post_id of 42 and "42" are the same post.
+                    if str(c["post_id"]) in done_posts:
                         continue  # already recorded -- never duplicate
-                    done_posts.add(c["post_id"])
-                    eout.write(json.dumps(c, ensure_ascii=False) + "\n")
+                    done_posts.add(str(c["post_id"]))
+                    eout.add(c)
                     new_contacts += 1
                 if new_contacts:
-                    eout.flush()
                     contacts_total += new_contacts
                 email_note = f" | {new_contacts} w/ email" if new_contacts else ""
                 print(f"  [{i}/{len(todo)}] + topic {tid}: {len(rec['posts'])} posts{email_note} "
@@ -255,8 +245,8 @@ def main() -> int:
 
     print(f"\nDone. Scraped {scraped} topics, {posts_total} posts this run "
           f"(checkpoint topic_id={cursor}).", file=sys.stderr)
-    print(f"  all posts   -> {args.out}", file=sys.stderr)
-    print(f"  {contacts_total} new posts with email(s) -> {args.emails_out}", file=sys.stderr)
+    print(f"  {contacts_total} new posts with email(s) stored "
+          f"({store.count()} in total).", file=sys.stderr)
     return 0
 
 

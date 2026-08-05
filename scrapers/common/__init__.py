@@ -9,6 +9,8 @@ Scrapers run as standalone scripts, so they add the ``scrapers/`` directory to
 """
 from .http import DEFAULT_UA, fetch
 from .emails import (
+    EMAIL_PROVIDERS,
+    email_provider,
     email_rank,
     extract_emails,
     extract_mailto,
@@ -23,6 +25,8 @@ __all__ = [
     "DEFAULT_UA",
     "fetch",
     "load_env",
+    "EMAIL_PROVIDERS",
+    "email_provider",
     "email_rank",
     "extract_emails",
     "extract_mailto",

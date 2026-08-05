@@ -74,27 +74,72 @@ PERSONAL_MAIL_DOMAINS = (
 )
 
 
+# The consumer families worth telling apart when picking who to write to --
+# a Gmail inbox behaves nothing like a Hotmail one for deliverability. Order
+# matters only in that the buckets don't overlap; everything else personal
+# falls through to "personal", and anything not personal at all to "company".
+PROVIDER_DOMAINS = (
+    ("gmail", ("gmail.com", "googlemail.com")),
+    ("outlook", ("outlook.", "live.", "msn.com")),
+    ("hotmail", ("hotmail.",)),
+)
+
+# Bucket keys in the order the UI lists them, with the label each carries.
+EMAIL_PROVIDERS = (
+    ("gmail", "Gmail"),
+    ("outlook", "Outlook"),
+    ("hotmail", "Hotmail"),
+    ("personal", "Other personal"),
+    ("company", "Company"),
+)
+
+
+def _domain_of(email: str) -> str:
+    """The part after the last "@", or "" if there isn't one."""
+    _, at, domain = (email or "").strip().lower().rpartition("@")
+    return domain if at else ""
+
+
+def _domain_matches(domain: str, known) -> bool:
+    """Match a domain against a family list.
+
+    An entry ending in a dot is a family: "yandex." matches yandex.ru and
+    yandex.com, "hotmail." every country's hotmail. Anything else is exact.
+    """
+    for entry in known:
+        if entry.endswith("."):
+            if domain.startswith(entry):
+                return True
+        elif domain == entry:
+            return True
+    return False
+
+
 def is_role_email(email: str) -> bool:
     """True for support@/info@/... -- a desk, not a person."""
     return bool(ROLE_RE.match((email or "").strip()))
 
 
 def is_personal_email(email: str) -> bool:
-    """True for a mailbox the person owns (gmail, proton, gmx, ...).
+    """True for a mailbox the person owns (gmail, proton, gmx, ...)."""
+    domain = _domain_of(email)
+    return bool(domain) and _domain_matches(domain, PERSONAL_MAIL_DOMAINS)
 
-    An entry ending in a dot is a family: "yandex." matches yandex.ru and
-    yandex.com, "hotmail." every country's hotmail. Anything else is exact.
+
+def email_provider(email: str) -> str:
+    """Which mailbox bucket an address falls in -- see ``EMAIL_PROVIDERS``.
+
+    "company" is the catch-all for a domain no consumer provider owns, which
+    in practice is an employer's or the person's own project domain. Returns
+    "" for something with no domain at all.
     """
-    domain = (email or "").strip().lower().rpartition("@")[2]
+    domain = _domain_of(email)
     if not domain:
-        return False
-    for known in PERSONAL_MAIL_DOMAINS:
-        if known.endswith("."):
-            if domain.startswith(known):
-                return True
-        elif domain == known:
-            return True
-    return False
+        return ""
+    for key, known in PROVIDER_DOMAINS:
+        if _domain_matches(domain, known):
+            return key
+    return "personal" if _domain_matches(domain, PERSONAL_MAIL_DOMAINS) else "company"
 
 
 def email_rank(email: str) -> tuple[int, int]:

@@ -6,6 +6,8 @@ web/node_modules
 web/.next/
 web/out/
 
+TODO
+
 # Python
 __pycache__/
 *.pyc
@@ -13,12 +15,28 @@ __pycache__/
 # Logs
 *.log
 
-# Scraper runtime state (not source)
-scrapers/state.json
+# The project's MySQL data directory. Created on first run by
+# scripts/mysql-server.js; db/my.ini beside it IS committed.
+/db/data/
+
+# Database dumps: large, and reproducible from the database itself
+/backups/
+# pid of the mysqld this project started (see scripts/mysql-server.js)
+.mysqld.pid
+
+# Scraper resume cursor (runtime state, not source). Everything else a scrape
+# produces goes into the database -- there are no data files any more.
 scrapers/**/.cursor
+
+# Legacy data files, from before the database. The server imports any that are
+# still present, once, then never reads them again. Ignored so re-appearing
+# copies (an old checkout, a restored backup) cannot get committed.
+scrapers/state.json
 scrapers/enrich_cache.json
 scrapers/sent.json
-# Pre-merge copy of a scraped file, written when two steps are merged
+scrapers/**/*.jsonl
+scrapers/**/*.json
+scrapers/slack/users/
 *.jsonl.bak
 *.jsonl.tmp
 

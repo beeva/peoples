@@ -2567,3 +2567,141 @@ img.avatar {
     padding: 11px 0;
   }
 }
+
+/* ---------- Database page ---------- */
+.db-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 940px;
+}
+.db-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+}
+.db-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.db-card-head h2 {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+.db-subhead {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 22px 0 10px;
+}
+.db-hint {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  margin: 0 0 14px;
+}
+.db-hint code,
+.db-facts code,
+.db-table code,
+.db-subhead code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+/* Status chip: green when the database agrees with the files, amber when a
+   file has moved on and its rows have not been ingested yet. */
+.db-pill {
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+.db-pill.ok {
+  background: color-mix(in srgb, var(--good) 16%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--good) 40%, transparent);
+  color: var(--good);
+}
+.db-pill.warn {
+  background: color-mix(in srgb, var(--warn) 16%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  color: var(--warn);
+}
+
+.db-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 14px 22px;
+  margin: 0;
+}
+.db-facts dt {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  margin-bottom: 5px;
+}
+.db-facts dd {
+  margin: 0;
+  font-size: 13.5px;
+}
+
+.db-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+.db-table th,
+.db-table td {
+  text-align: left;
+  padding: 8px 10px 8px 0;
+  border-bottom: 1px solid var(--border-soft);
+  font-weight: 400;
+}
+.db-table thead th {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.db-table tbody tr:last-child th,
+.db-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.db-table tbody th[scope="row"] {
+  font-weight: 550;
+}
+.db-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.db-note {
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+.db-inline-note {
+  margin: 12px 0 0;
+}
+
+.db-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+.db-small {
+  min-height: 30px;
+  padding: 4px 12px;
+  font-size: 12.5px;
+}

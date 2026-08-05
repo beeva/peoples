@@ -1,40 +1,40 @@
 #!/usr/bin/env python3
-"""Lightweight zero-dependency JSON API for browsing scraped contacts.
+"""MySQL-backed JSON API for browsing scraped contacts.
 
-This is the data API consumed by the Next.js app in web/ (run it separately
-with `npm run dev`). It exposes pagination, full-text search, sorting,
-**multiple data sources**, single-contact detail, Claude-generated outreach
-email, and **on-demand incremental re-scraping** of each source:
+This is the data API consumed by the Next.js app in web/ (run both with
+`npm run dev`). It exposes pagination, full-text search, sorting, **multiple
+data sources**, single-contact detail, Claude-generated outreach email, and
+**on-demand incremental re-scraping** of each source:
 
-    * discourse  -> scrapers/discourse/threejs/threejs_emails.jsonl
-    * devto      -> scrapers/devto/jobs.json
-    * aboutme    -> scrapers/aboutme/users.jsonl
-    * github     -> scrapers/github/users.jsonl
+    * discourse, aboutme, github  (and dev.to, stored but not one of the tabs)
 
-Each source is normalised into one common record shape (with a `source` tag).
-A re-scrape runs the source's scraper as a background subprocess; every scraper
-is incremental (it skips content it already has), so re-scraping only fetches
-what is new. After a scrape finishes the source is hot-reloaded in memory.
+**Everything lives in MySQL.** The scrapers insert each record as they collect
+it and read their resume state back out of the same tables, so there are no
+data files: no JSONL to append, no JSON mirror to rewrite, nothing to re-read
+at boot. Every request is answered with SQL, so the cost of a page does not
+grow with the size of the archive. Claude's country/gender inferences, the
+sent-message log, the ruled-out logins and the per-source scraper state are
+rows too.
 
-No third-party packages required. Configuration (API key, SMTP, enrichment)
-is read from a `.env` file next to this script if present -- see `.env.example`:
+The database belongs to the project -- `db/data`, `db/my.ini`, port 3307 --
+and `npm run dev` starts it alongside this server and the web app. XAMPP
+supplies only the mysqld binary; its own databases are untouched.
+Configuration comes from a `.env` file next to this script -- see
+`.env.example`:
 
     python server.py            # http://127.0.0.1:8000
     python server.py 9000       # custom port
 """
 import json
 import os
-import re
 import smtplib
 import subprocess
 import sys
 import threading
 import time
-import unicodedata
 import urllib.error
 import urllib.request
 from collections import deque
-from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import formataddr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,15 +43,6 @@ from urllib.parse import urlparse, parse_qs
 
 BASE_DIR = Path(__file__).resolve().parent
 SCRAPERS_DIR = BASE_DIR / "scrapers"
-
-# The scrapers decide which of a person's addresses is the one to write to; the
-# API reads that same rule rather than keeping a second opinion. Applying it on
-# load also means records scraped before the rule existed are ordered correctly
-# without re-scraping them.
-sys.path.insert(0, str(SCRAPERS_DIR))
-from common import personal_first, write_json_array  # noqa: E402
-STATE_FILE = SCRAPERS_DIR / "state.json"
-MAX_PER_PAGE = 100
 
 
 def _load_dotenv(path: Path) -> None:
@@ -81,13 +72,25 @@ def _load_dotenv(path: Path) -> None:
             os.environ[key] = val
 
 
-# Load .env before reading any config below (real env vars take precedence).
+# Load .env before importing anything that reads config at import time.
 _load_dotenv(BASE_DIR / ".env")
+
+import db          # noqa: E402  -- reads MYSQL_* from the environment
+import dbdump      # noqa: E402
+import dbquery     # noqa: E402
+import dbslack     # noqa: E402
+import dbsync      # noqa: E402
+import records as rec_mod  # noqa: E402
+from dbquery import MAX_PER_PAGE, _to_float, _to_int  # noqa: E402
+from records import now_iso as _now_iso  # noqa: E402
+
+SOURCES = rec_mod.SOURCES
+SOURCE_BY_KEY = rec_mod.SOURCE_BY_KEY
 
 # ---- outbound messaging (Claude-generated email) --------------------------
 # Everything sensitive comes from the environment -- nothing is hardcoded.
 # Required to generate:  ANTHROPIC_API_KEY
-# Required to send:      SMTP_PASSWORD  (an Outlook app password)
+# Required to send:      SMTP_PASSWORD  (an app password)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
@@ -100,31 +103,16 @@ MAIL_FROM = os.environ.get("MAIL_FROM", SMTP_USER)
 # Display name shown to the recipient (and used for the email sign-off).
 MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "Ephrem")
 
-# ---- contact enrichment (Claude-inferred country + gender, cached) --------
-# Inferred once per contact (keyed by primary email) and cached to disk, then
-# filled in lazily by background workers for contacts that get viewed.
-ENRICH_FILE = SCRAPERS_DIR / "enrich_cache.json"
+# ---- contact enrichment (Claude-inferred country + gender) ----------------
+# Inferred once per contact (keyed by primary email), stored in the
+# `enrichment` table, and filled in lazily by background workers for contacts
+# that get viewed.
 ENRICH_ENABLED = bool(ANTHROPIC_API_KEY) and \
     os.environ.get("ENRICH", "1").lower() not in ("0", "false", "no")
 ENRICH_WORKERS = max(1, int(os.environ.get("ENRICH_WORKERS", "3")))
 ENRICH_LOCK = threading.Lock()
-ENRICH_CACHE: dict = {}      # primary email -> {"country","country_code","gender"}
 ENRICH_QUEUE: deque = deque()
-ENRICH_SEEN: set = set()     # emails queued/done this run (avoid re-enqueue)
-
-# ---- sent-message log (which contacts we've emailed) ----------------------
-# Persisted to disk so "Sent" badges survive restarts. Keyed by recipient
-# email (lowercased); a contact counts as messaged if ANY of its emails match.
-# Entries written by /api/message/mark carry "manual": true -- the contact was
-# emailed outside this app, so there is no body/subject to remember.
-SENT_FILE = SCRAPERS_DIR / "sent.json"
-SENT_LOCK = threading.Lock()
-SENT_LOG: dict = {}          # recipient email -> {"count","last_sent","last_subject"}
-
-DISCOURSE_FILE = SCRAPERS_DIR / "discourse" / "threejs" / "threejs_emails.jsonl"
-DEVTO_FILE = SCRAPERS_DIR / "devto" / "jobs.json"
-ABOUTME_FILE = SCRAPERS_DIR / "aboutme" / "users.jsonl"
-GITHUB_FILE = SCRAPERS_DIR / "github" / "users.jsonl"
+ENRICH_SEEN: set = set()     # emails queued this run (avoid re-enqueue)
 
 # Per-source resume cursors written by the scrapers (git-ignored runtime state).
 DISCOURSE_CURSOR = SCRAPERS_DIR / "discourse" / "threejs" / ".cursor"
@@ -133,531 +121,24 @@ GITHUB_CURSOR = SCRAPERS_DIR / "github" / ".cursor"
 CURSOR_FILES = {"discourse": DISCOURSE_CURSOR, "aboutme": ABOUTME_CURSOR,
                 "github": GITHUB_CURSOR}
 
-# Strip HTML tags to build a clean text preview / searchable blob.
-_TAG_RE = re.compile(r"<[^>]+>")
-_WS_RE = re.compile(r"\s+")
-_MD_RE = re.compile(r"[#>*_`~\[\]()!]+")  # light markdown noise
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _strip_html(html: str) -> str:
-    text = _TAG_RE.sub(" ", html or "")
-    text = (
-        text.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", '"')
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
-    )
-    return _WS_RE.sub(" ", text).strip()
-
-
-def _preview(text: str, limit: int = 320) -> str:
-    text = _strip_html(text)
-    if len(text) > limit:
-        text = text[:limit].rsplit(" ", 1)[0] + "…"
-    return text
-
-
-def _md_preview(markdown: str, limit: int = 320) -> str:
-    text = _MD_RE.sub(" ", markdown or "")
-    return _preview(text, limit)
-
-
-def _md_clean(markdown: str) -> str:
-    """Full markdown -> plain text, untruncated (for the detail page)."""
-    return _strip_html(_MD_RE.sub(" ", markdown or ""))
-
-
-def _parse_ts(value: str) -> float:
-    if not value:
-        return 0.0
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return 0.0
-
-
-def _fmt_date(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%b %Y")
-
-
-def _read_jsonl(path: Path):
-    if not path.exists():
-        print(f"[warn] data file not found: {path}", file=sys.stderr)
-        return
-    with path.open(encoding="utf-8") as fh:
-        for line_no, line in enumerate(fh, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                print(f"[warn] {path.name}: skipping malformed line {line_no}", file=sys.stderr)
-
-
-def _read_json_array(path: Path):
-    if not path.exists():
-        print(f"[warn] data file not found: {path}", file=sys.stderr)
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        print(f"[warn] {path.name}: malformed JSON", file=sys.stderr)
-        return []
-    return data if isinstance(data, list) else []
-
-
-def _norm_tags(tags) -> list[str]:
-    """dev.to tag_list is sometimes a list, sometimes a comma string."""
-    if isinstance(tags, str):
-        return [t.strip() for t in tags.split(",") if t.strip()]
-    return [str(t).strip() for t in (tags or []) if str(t).strip()]
-
-
-def _norm_links(links) -> list[str]:
-    """about.me links are dicts (or strings); pull out URL-ish values."""
-    out = []
-    for it in links or []:
-        if isinstance(it, str):
-            out.append(it)
-        elif isinstance(it, dict):
-            for k in ("url", "href", "link", "value"):
-                v = it.get(k)
-                if v:
-                    out.append(v)
-                    break
-    return [s for s in out if s]
-
-
-# ---- common record shape --------------------------------------------------
-def _record(source, local_id, *, emails, name="", username="", title="",
-            url="", created_at="", preview="", tags=None, location="",
-            organization="", apply_links=None, messaging=None, links=None,
-            search_extra="", full="", site_url="", activity_at="", run=0,
-            country="", country_code="", gender=""):
-    emails = [e.lower() for e in (emails or []) if e]
-    seen, uniq = set(), []
-    for e in emails:
-        if e not in seen:
-            seen.add(e)
-            uniq.append(e)
-    rec = {
-        "id": f"{source}:{local_id}",
-        "source": source,
-        "emails": uniq,
-        "name": (name or "").strip(),
-        "username": (username or "").strip(),
-        "title": (title or "").strip(),
-        "url": url or "",
-        # The person's own site (a GitHub profile's `blog`), as opposed to the
-        # profile page itself -- worth its own field so the UI can label it.
-        "site_url": site_url or "",
-        "created_at": created_at or "",
-        # When the contact was last seen active at the source ("" if unknown).
-        "activity_at": activity_at or "",
-        # Which scrape run collected this contact (0 = the source does not
-        # number its runs). Lets the UI show what a given run brought in.
-        "run": run or 0,
-        # Country/gender the *scraper* determined (GitHub: from location, and
-        # gender only when a --gender scrape ran). A fallback for the merge when
-        # Claude enrichment has not filled these in yet.
-        "_scraped_country": (country or "").strip(),
-        "_scraped_country_code": (country_code or "").strip().upper()[:2],
-        "_scraped_gender": (gender or "").strip().lower(),
-        "preview": preview or "",
-        "tags": tags or [],
-        "location": (location or "").strip(),
-        "organization": (organization or "").strip(),
-        "apply_links": apply_links or [],
-        "messaging": messaging or [],
-        "links": links or [],
-    }
-    # Full, untruncated cleaned text of this single occurrence -- shown on the
-    # detail page (the list only needs `preview`). Falls back to the preview.
-    rec["_full"] = (full or rec["preview"] or "").strip()
-    # Sort on the date the UI shows: for a profile that is "last active", for a
-    # post it is when it was written. Keeps the Date column and its sort honest.
-    rec["_ts"] = _parse_ts(activity_at or created_at or "")
-    # The join date on its own, for the account-age filter (0.0 = unknown).
-    rec["_created_ts"] = _parse_ts(created_at or "")
-    rec["_blob"] = " ".join([
-        " ".join(uniq), rec["name"], rec["username"], rec["title"],
-        rec["location"], rec["organization"], " ".join(rec["tags"]),
-        rec["_full"], search_extra,
-    ]).lower()
-    return rec
-
-
-# ---- per-source loaders ---------------------------------------------------
-def load_discourse():
-    records = []
-    for i, d in enumerate(_read_jsonl(DISCOURSE_FILE), 1):
-        records.append(_record(
-            "discourse", d.get("post_id", i),
-            emails=d.get("emails", []),
-            name=d.get("name") or "",
-            username=d.get("username") or "",
-            title=d.get("topic_title", ""),
-            url=d.get("post_url") or d.get("topic_url") or "",
-            created_at=d.get("created_at", ""),
-            preview=_preview(d.get("cooked", "")),
-            full=_strip_html(d.get("cooked", "")),
-            search_extra=d.get("topic_title", ""),
-        ))
-    return records
-
-
-def load_devto():
-    records = []
-    for i, d in enumerate(_read_json_array(DEVTO_FILE), 1):
-        contact = d.get("contact") or {}
-        emails = list(contact.get("emails", [])) + list(contact.get("mailto", []))
-        records.append(_record(
-            "devto", d.get("id", i),
-            emails=emails,
-            name=d.get("author") or "",
-            title=d.get("title", ""),
-            url=d.get("url") or "",
-            created_at=d.get("published_at", ""),
-            preview=_md_preview(d.get("description", "")),
-            full=_md_clean(d.get("description", "")),
-            tags=_norm_tags(d.get("tags")),
-            organization=d.get("organization") or "",
-            apply_links=contact.get("apply_links", []),
-            messaging=contact.get("messaging", []),
-        ))
-    return records
-
-
-def load_aboutme():
-    records = []
-    for i, d in enumerate(_read_jsonl(ABOUTME_FILE), 1):
-        username = d.get("username") or str(d.get("user_id") or i)
-        records.append(_record(
-            "aboutme", username,
-            emails=d.get("emails", []),
-            name=d.get("full_name") or username,
-            username=username,
-            title=d.get("role") or "",
-            url=d.get("url") or "",
-            created_at="",  # about.me profiles have no timestamp
-            preview=_preview(d.get("summary") or ""),
-            full=_strip_html(d.get("summary") or ""),
-            location=d.get("location") or "",
-            links=_norm_links(d.get("links")),
-            search_extra=" ".join(d.get("schools", []) + d.get("interests", [])),
-        ))
-    return records
-
-
-def load_github():
-    records = []
-    for i, d in enumerate(_read_jsonl(GITHUB_FILE), 1):
-        login = d.get("login") or str(d.get("user_id") or i)
-        bio = d.get("bio") or ""
-        # Which sources the email came from ("profile", "site", ...) -- worth
-        # surfacing as tags: a profile email is a warmer lead than a commit one.
-        via = list((d.get("email_sources") or {}).keys())
-        twitter = d.get("twitter")
-        # The GitHub profile is `url`; the portfolio site is its own field. Any
-        # Twitter handle rounds out the "links" list shown on the detail card.
-        links = [f"https://twitter.com/{twitter}"] if twitter else []
-        records.append(_record(
-            "github", login,
-            # Personal mailbox first (gmail, proton, ...), then a work address,
-            # then a role desk (support@, info@) -- emails[0] is what the table
-            # shows and what the Message button writes to. Stable, so within a
-            # rank the scraper's own source order (profile > site > commit) holds.
-            emails=personal_first(d.get("emails", [])),
-            name=d.get("full_name") or login,
-            username=login,
-            title=d.get("company") or "",
-            url=d.get("url") or f"https://github.com/{login}",
-            site_url=d.get("site_url") or "",
-            created_at=d.get("created_at", ""),        # the day they joined
-            activity_at=d.get("last_activity", ""),    # last public activity
-            # Users scraped before runs were numbered are, by definition, run 1.
-            run=_to_int(str(d.get("run", "")), 1),
-            country=d.get("country") or "",            # from regions.py classify()
-            country_code=d.get("country_code") or "",
-            gender=d.get("gender") or "",              # set only by a --gender run
-            preview=_preview(bio),
-            full=bio,
-            tags=[t for t in [d.get("country")] if t] + [f"via {v}" for v in via],
-            location=d.get("location") or "",
-            organization=d.get("company") or "",
-            links=links,
-            search_extra=" ".join(filter(None, (
-                d.get("country"), d.get("region"), d.get("site_url"), twitter,
-            ))),
-        ))
-    return records
-
-
-# ---- merge same-email rows ------------------------------------------------
-def _merge_group(group: list[dict]) -> dict:
-    """Collapse records that belong to one contact into a single row.
-
-    The newest record is the representative (its title/url/preview head the
-    card); every other occurrence is kept under ``posts`` so nothing is lost.
-    List fields (emails, tags, links) are unioned, order-preserving.
-    """
-    group = sorted(group, key=lambda r: r["_ts"], reverse=True)
-    rep = dict(group[0])
-
-    def first(field: str) -> str:
-        for r in group:
-            if r.get(field):
-                return r[field]
-        return rep.get(field, "")
-
-    def union(field: str) -> list:
-        seen, out = set(), []
-        for r in group:
-            for v in r.get(field) or []:
-                if v not in seen:
-                    seen.add(v)
-                    out.append(v)
-        return out
-
-    rep["emails"] = union("emails")
-    rep["name"] = first("name")
-    rep["username"] = first("username")
-    rep["organization"] = first("organization")
-    rep["location"] = first("location")
-    rep["site_url"] = first("site_url")
-    # Latest activity across everything merged into this contact.
-    rep["activity_at"] = max((r.get("activity_at") or "" for r in group),
-                             default="")
-    rep["tags"] = union("tags")
-    rep["apply_links"] = union("apply_links")
-    rep["messaging"] = union("messaging")
-    rep["links"] = union("links")
-    rep["post_count"] = len(group)
-    # Compact refs to a few other occurrences (besides the representative) -- a
-    # light teaser for the list card. Capped so the list payload stays small.
-    rep["posts"] = [
-        {"title": r.get("title") or "", "url": r.get("url") or "",
-         "created_at": r.get("created_at") or ""}
-        for r in group[1:6] if (r.get("url") or r.get("title"))
-    ]
-    # Every occurrence with its FULL text -- served only by the detail endpoint.
-    rep["_detail_posts"] = [
-        {"title": r.get("title") or "", "url": r.get("url") or "",
-         "created_at": r.get("created_at") or "", "text": r.get("_full") or ""}
-        for r in group
-    ]
-    rep["_occurrences"] = len(group)
-    rep["_ts"] = max(r["_ts"] for r in group)
-    rep["_blob"] = " ".join(r["_blob"] for r in group)
-    # Country/gender: Claude enrichment first, then whatever the scraper already
-    # worked out (GitHub knows the country from the location, and the gender too
-    # when a --gender scrape ran). So a scrape-time value shows at once and is
-    # not re-inferred, while enrichment still fills the gaps for other sources.
-    enr = _enrichment_for(rep["emails"][0] if rep["emails"] else "")
-    rep["country"] = enr.get("country") or rep.get("_scraped_country") or ""
-    rep["country_code"] = (enr.get("country_code")
-                           or rep.get("_scraped_country_code") or "")
-    rep["gender"] = enr.get("gender") or rep.get("_scraped_gender") or ""
-    # Have we emailed this contact? (filled from the persisted sent log.)
-    _set_sent_fields(rep)
-    return rep
-
-
-def _merge_by_email(records: list[dict]) -> list[dict]:
-    """Group a source's records so each contact email appears on one row.
-
-    Records are linked when they share any email (union-find), so a person who
-    posted the same address across many posts collapses to a single row even if
-    some posts list extra addresses. Records with no email stay on their own.
-    """
-    parent = list(range(len(records)))
-
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def link(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    seen_email: dict[str, int] = {}
-    for idx, rec in enumerate(records):
-        for e in rec["emails"]:
-            if e in seen_email:
-                link(seen_email[e], idx)
-            else:
-                seen_email[e] = idx
-
-    groups: dict[int, list[dict]] = {}
-    for idx in range(len(records)):
-        groups.setdefault(find(idx), []).append(records[idx])
-    return [_merge_group(g) for g in groups.values()]
-
-
-# ---- source registry ------------------------------------------------------
-SOURCES = [
-    {"key": "discourse", "label": "three.js forum", "noun": "Posts", "loader": load_discourse},
-    {"key": "aboutme", "label": "about.me", "noun": "Profiles", "loader": load_aboutme},
-    {"key": "github", "label": "GitHub", "noun": "Profiles", "loader": load_github},
-]
-SOURCE_BY_KEY = {s["key"]: s for s in SOURCES}
-NOUNS = {s["key"]: s["noun"] for s in SOURCES}
-NOUNS["all"] = "Records"
-
-PUBLIC_FIELDS = (
-    "id", "source", "emails", "name", "username", "title", "url", "site_url",
-    "created_at", "activity_at", "run", "preview", "tags", "location",
-    "organization", "apply_links", "messaging", "links", "posts", "post_count",
-    "country", "country_code", "gender",
-    "messaged", "messaged_count", "messaged_at", "messaged_to", "messaged_manual",
-)
-
-
-# ---- sorting --------------------------------------------------------------
-def _text_key(value: str) -> str:
-    """Sort key for a text column: case-insensitive, accents folded.
-
-    Without the folding, "Ángel" sorts after "Zoe" -- accented letters live far
-    above Z in Unicode -- so an A-Z list would end on a name that starts with A.
-    Folding puts it where a reader looks for it, next to "Andres".
-    """
-    decomposed = unicodedata.normalize("NFKD", (value or "").strip().lower())
-    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-
-
-def _name_of(rec: dict) -> str:
-    return _text_key(rec.get("name") or rec.get("username") or "")
-
-
-def _email_of(rec: dict) -> str:
-    emails = rec.get("emails") or []
-    return _text_key(emails[0] if emails else "")
-
-
-def _blank_last(key_fn):
-    """Wrap a text key so empty values sink to the bottom whichever way we sort.
-
-    With `reverse=True` Python flips the whole tuple, so a plain (blank, text)
-    key would float the blanks to the top. Negating the flag for the descending
-    variants keeps them where they belong.
-    """
-    def ascending(rec):
-        value = key_fn(rec)
-        return (value == "", value)
-
-    def descending(rec):
-        value = key_fn(rec)
-        return (value != "", value)
-
-    return ascending, descending
-
-
-_name_asc, _name_desc = _blank_last(_name_of)
-_email_asc, _email_desc = _blank_last(_email_of)
-_country_asc, _country_desc = _blank_last(lambda r: _text_key(r.get("country") or ""))
-
-# sort key -> (key function, reverse). The date sorts keep their old names, so
-# links and bookmarks made before the other columns existed still work.
-SORTS = {
-    "newest": (lambda r: r["_ts"], True),
-    "oldest": (lambda r: r["_ts"], False),
-    # Within one run the newest contact leads, so a run reads like a batch.
-    "run_desc": (lambda r: (r.get("run") or 0, r["_ts"]), True),
-    "run_asc": (lambda r: (r.get("run") or 0, -r["_ts"]), False),
-    "name_asc": (_name_asc, False),
-    "name_desc": (_name_desc, True),
-    "email_asc": (_email_asc, False),
-    "email_desc": (_email_desc, True),
-    "country_asc": (_country_asc, False),
-    "country_desc": (_country_desc, True),
-}
-DEFAULT_SORT = "newest"
-
-# In-memory dataset, guarded by DATA_LOCK (ThreadingHTTPServer is multi-threaded).
-DATA_LOCK = threading.RLock()
-BY_SOURCE = {}
-ALL_RECORDS = []
-RECORD_BY_ID = {}
-STATS_BY_SOURCE = {}
-SOURCE_LIST = []
-
-
-def _stats_for(records, noun):
-    ts_values = [r["_ts"] for r in records if r["_ts"]]
-    unique = {e for r in records for e in r["emails"]}
-    return {
-        "total_posts": sum(r.get("_occurrences", 1) for r in records),
-        "total_emails": sum(len(r["emails"]) for r in records),
-        "unique_emails": len(unique),
-        "earliest": _fmt_date(min(ts_values)) if ts_values else None,
-        "latest": _fmt_date(max(ts_values)) if ts_values else None,
-        "noun": noun,
-    }
-
-
-def _rebuild_aggregates():
-    """Recompute ALL_RECORDS / stats / source list from BY_SOURCE. Hold DATA_LOCK."""
-    global ALL_RECORDS, RECORD_BY_ID, STATS_BY_SOURCE, SOURCE_LIST
-    ALL_RECORDS = [r for s in SOURCES for r in BY_SOURCE.get(s["key"], [])]
-    RECORD_BY_ID = {r["id"]: r for r in ALL_RECORDS}
-    STATS_BY_SOURCE = {"all": _stats_for(ALL_RECORDS, NOUNS["all"])}
-    for s in SOURCES:
-        STATS_BY_SOURCE[s["key"]] = _stats_for(BY_SOURCE.get(s["key"], []), s["noun"])
-    SOURCE_LIST = [{"key": "all", "label": "All", "noun": NOUNS["all"],
-                    "count": len(ALL_RECORDS)}]
-    for s in SOURCES:
-        SOURCE_LIST.append({
-            "key": s["key"], "label": s["label"], "noun": s["noun"],
-            "count": len(BY_SOURCE.get(s["key"], [])),
-        })
-
-
-def reload_source(key: str) -> int:
-    """Re-read one source from disk and rebuild aggregates. Returns its count."""
-    with DATA_LOCK:
-        BY_SOURCE[key] = _merge_by_email(SOURCE_BY_KEY[key]["loader"]())
-        _rebuild_aggregates()
-        return len(BY_SOURCE[key])
-
-
-def load_all():
-    with DATA_LOCK:
-        for s in SOURCES:
-            BY_SOURCE[s["key"]] = _merge_by_email(s["loader"]())
-        _rebuild_aggregates()
-
 
 # ---- persisted per-source state (last_run, counts, cursor) ----------------
+# Mirrored in memory because every scrape-status poll reads it; the database
+# is still where it lives.
 STATE_LOCK = threading.Lock()
 STATE = {}
 
 
 def load_state():
     global STATE
+    STATE = db.state_get_all()
+
+
+def save_state(key: str) -> None:
     try:
-        STATE = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        if not isinstance(STATE, dict):
-            STATE = {}
-    except (OSError, json.JSONDecodeError):
-        STATE = {}
-
-
-def save_state():
-    with STATE_LOCK:
-        try:
-            STATE_FILE.write_text(json.dumps(STATE, indent=2), encoding="utf-8")
-        except OSError as e:
-            print(f"[warn] could not write {STATE_FILE.name}: {e}", file=sys.stderr)
+        db.state_put(key, STATE.get(key) or {})
+    except Exception as e:  # noqa: BLE001 -- state is a convenience, not critical
+        print(f"[warn] could not save state for {key}: {e}", file=sys.stderr)
 
 
 # ---- scrape jobs ----------------------------------------------------------
@@ -666,11 +147,18 @@ JOBS = {}  # source -> job dict
 
 
 def _seed_discourse_cursor() -> int:
-    """Highest topic_id already in the emails file -> first-run resume point,
-    so we don't re-scrape the topics we already have."""
+    """Highest topic_id already stored -> first-run resume point, so we don't
+    re-scrape the topics we already have.
+
+    Read out of each record's preserved raw JSON, which is where the scraper's
+    own `topic_id` lives (the normalised columns have no field for it).
+    """
     best = 0
-    for d in _read_jsonl(DISCOURSE_FILE):
-        tid = d.get("topic_id")
+    for row in db.query("SELECT raw FROM records WHERE source = 'discourse'"):
+        try:
+            tid = json.loads(row["raw"] or "{}").get("topic_id")
+        except ValueError:
+            continue
         if isinstance(tid, int) and tid > best:
             best = tid
     return best
@@ -779,12 +267,22 @@ def _terminate(proc):
             pass
 
 
+def _live_count(key: str) -> int:
+    """How many contacts the source holds right now.
+
+    The scraper writes each record to the database as it collects it, so there
+    is nothing to ingest here -- only the cached aggregates to drop, so the
+    next page reflects what has just arrived.
+    """
+    dbquery.invalidate_caches()
+    return dbquery.source_count(key)
+
+
 def _run_scrape(key: str, params: dict):
-    """Run a scraper subprocess, stream its log, live-reload while it runs, and
-    hot-reload once more when it finishes (or is stopped)."""
+    """Run a scraper subprocess, stream its log, ingest while it runs, and
+    ingest once more when it finishes (or is stopped)."""
     job = JOBS[key]
-    with DATA_LOCK:
-        before = len(BY_SOURCE.get(key, []))
+    before = dbquery.source_count(key)
     try:
         argv = _scrape_argv(key, params)
     except ValueError as e:
@@ -808,14 +306,14 @@ def _run_scrape(key: str, params: dict):
     if job.get("stop_requested"):
         _terminate(proc)
 
-    # Watchdog: re-read the source from disk every couple of seconds so the UI
-    # sees new records stream in while the scraper is still running.
+    # Watchdog: the scraper stores each record as it lands, so this only has to
+    # refresh the running count (and drop the cached aggregates) for the UI.
     stop_evt = threading.Event()
 
     def watch():
         while not stop_evt.wait(2.0):
             try:
-                cnt = reload_source(key)
+                cnt = _live_count(key)
                 job["added"] = cnt - before
                 job["total"] = cnt
             except Exception:  # noqa: BLE001 -- never let the watchdog die
@@ -830,10 +328,10 @@ def _run_scrape(key: str, params: dict):
             job["log"].append(line)
     rc = proc.wait()
     stop_evt.set()
-    watcher.join(timeout=3)
+    watcher.join(timeout=5)
     job["proc"] = None
 
-    after = reload_source(key)
+    after = _live_count(key)
     added = after - before
     stopped = bool(job.get("stop_requested"))
     if stopped:
@@ -867,7 +365,7 @@ def _run_scrape(key: str, params: dict):
             "total": after,
             "cursor": cursor or prev.get("cursor"),
         }
-    save_state()
+    save_state(key)
 
 
 def start_scrape(key: str, params: dict) -> dict:
@@ -935,45 +433,21 @@ def _job_view(key: str) -> dict:
 
 
 # ---- merging scrape runs --------------------------------------------------
-# A "step" is the scrape run that found a contact. Runs are only numbered by
-# sources that record a `run` field, and each such source keeps its data in one
-# JSONL file plus the pretty JSON mirror the scraper writes beside it.
-RUN_FILES = {"github": (GITHUB_FILE, GITHUB_FILE.with_suffix(".json"))}
+# A "step" is the scrape run that found a contact. Only sources whose scraper
+# stamps a run number have steps to merge.
+RUN_SOURCES = {"github"}
 MERGE_LOCK = threading.Lock()
-
-
-def _rec_run(d: dict) -> int:
-    """A raw record's run number. Records written before runs were numbered have
-    no field and count as run 1 -- the same rule the loader and the scraper's
-    own `_next_run` apply."""
-    return _to_int(str(d.get("run", "")), 1)
-
-
-def run_counts(key: str) -> list[dict]:
-    """[{run, count}] for one source, straight from disk, lowest run first."""
-    path = (RUN_FILES.get(key) or (None,))[0]
-    if path is None:
-        return []
-    counts: dict[int, int] = {}
-    for d in _read_jsonl(path):
-        r = _rec_run(d)
-        counts[r] = counts.get(r, 0) + 1
-    return [{"run": r, "count": c} for r, c in sorted(counts.items())]
 
 
 def merge_runs(key: str, from_runs: list[int], into: int) -> dict:
     """Relabel every contact collected on `from_runs` as belonging to `into`.
 
     Two scrapes that were really one piece of work (a run that died half way and
-    the one that finished it) should read as one step. The run number lives on
-    the scraped record, so merging rewrites the source file in place -- the
-    previous contents are kept alongside as `.bak` because nothing else
-    remembers which run a contact originally came in on.
-
-    Merging never touches the contacts themselves, only their step label.
+    the one that finished it) should read as one step. Merging never touches the
+    contacts themselves, only their step label -- which is now a column, so this
+    is an UPDATE rather than a rewrite of the whole archive.
     """
-    entry = RUN_FILES.get(key)
-    if entry is None:
+    if key not in RUN_SOURCES:
         return {"ok": False, "status": 400,
                 "error": f"'{key or 'all'}' does not number its scrape runs"}
     if into <= 0:
@@ -983,79 +457,30 @@ def merge_runs(key: str, from_runs: list[int], into: int) -> dict:
         return {"ok": False, "status": 400,
                 "error": "pick a different run to merge in"}
 
-    # The scraper appends to this file as it goes; rewriting it underneath a
-    # live run would lose whatever it wrote in between.
+    # A running scrape is still assigning its own run number; relabelling
+    # underneath it would put some of its contacts on the wrong step.
     with JOBS_LOCK:
         job = JOBS.get(key)
         if job and job.get("status") == "running":
             return {"ok": False, "status": 409,
                     "error": "a scrape is running -- stop it first"}
 
-    path, mirror = entry
     with MERGE_LOCK:
-        if not path.exists():
-            return {"ok": False, "status": 404,
-                    "error": f"no data file for '{key}' yet"}
-        # Line by line, so a line we cannot parse is carried over untouched
-        # rather than silently dropped by the rewrite.
-        out: list[str] = []
-        moved = 0
-        present: set[int] = set()
-        with path.open(encoding="utf-8") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    d = json.loads(stripped)
-                except json.JSONDecodeError:
-                    out.append(stripped)
-                    continue
-                run = _rec_run(d)
-                present.add(run)
-                if run in wanted:
-                    d["run"] = into
-                    moved += 1
-                out.append(json.dumps(d, ensure_ascii=False))
-
-        missing = sorted(wanted - present)
+        present = dbsync.runs_present(key)
         if into not in present:
             return {"ok": False, "status": 404,
                     "error": f"run {into} has no contacts"}
+        missing = sorted(wanted - present)
         if missing:
             return {"ok": False, "status": 404,
                     "error": "no contacts on run "
                              + ", ".join(str(m) for m in missing)}
+        moved = dbsync.relabel_runs(key, wanted, into)
 
-        try:
-            backup = path.with_suffix(path.suffix + ".bak")
-            backup.write_bytes(path.read_bytes())
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
-            tmp.replace(path)  # atomic swap, so a crash cannot truncate the data
-            if mirror.exists():
-                write_json_array(str(path), str(mirror))
-        except OSError as e:
-            return {"ok": False, "status": 500,
-                    "error": f"could not rewrite {path.name}: {e}"}
-
-    total = reload_source(key)
+    dbquery.invalidate_caches()
     return {"ok": True, "moved": moved, "into": into,
-            "merged": sorted(wanted), "total": total,
-            "runs": run_counts(key)}
-
-
-# ---- query ----------------------------------------------------------------
-def detail_record(rec_id: str) -> dict | None:
-    """Full view of one merged contact: public fields + every post's full text."""
-    with DATA_LOCK:
-        rec = RECORD_BY_ID.get(rec_id)
-        if rec is None:
-            return None
-        _enqueue_enrichment(rec)
-        view = {k: rec.get(k) for k in PUBLIC_FIELDS}
-        view["posts_full"] = rec.get("_detail_posts", [])
-        return view
+            "merged": sorted(wanted), "total": dbquery.source_count(key),
+            "runs": dbquery.run_counts(key)}
 
 
 # ---- Claude helpers (structured JSON via the Messages API) -----------------
@@ -1109,10 +534,10 @@ GEN_SCHEMA = {
 }
 
 
-def _contact_context(rec: dict) -> str:
+def _contact_context(view: dict) -> str:
     """A compact, factual brief about the contact for the prompt (their posts)."""
     lines = []
-    for p in (rec.get("_detail_posts") or [])[:5]:
+    for p in (view.get("posts_full") or [])[:5]:
         title = (p.get("title") or "").strip()
         snippet = " ".join((p.get("text") or "").split())[:400]
         if title or snippet:
@@ -1120,9 +545,9 @@ def _contact_context(rec: dict) -> str:
     return "\n".join(lines) or "(no posts or profile text captured)"
 
 
-def generate_message(rec: dict, intent: str, tone: str) -> dict:
+def generate_message(view: dict, intent: str, tone: str) -> dict:
     """Ask Claude for a personalised {subject, body}. Raises on any failure."""
-    name = rec.get("name") or rec.get("username") or "there"
+    name = view.get("name") or view.get("username") or "there"
     system = (
         "You write short, personalised cold-outreach emails. The body must be "
         "plain text (no markdown), 80-150 words, with a greeting that uses the "
@@ -1133,8 +558,8 @@ def generate_message(rec: dict, intent: str, tone: str) -> dict:
     user = (
         f"Recipient name: {name}\n"
         f"Sender name (sign the email off as this): {MAIL_FROM_NAME}\n"
-        f"Source: {rec.get('source')}\n"
-        f"Context from their posts/profile:\n{_contact_context(rec)}\n\n"
+        f"Source: {view.get('source')}\n"
+        f"Context from their posts/profile:\n{_contact_context(view)}\n\n"
         f"Desired tone: {tone or 'friendly and professional'}\n"
         f"Goal of the email / what to say:\n"
         f"{intent or 'A brief, warm introduction and an invitation to connect.'}"
@@ -1148,9 +573,9 @@ def generate_message(rec: dict, intent: str, tone: str) -> dict:
 
 
 def send_email(to_addr: str, subject: str, body: str) -> None:
-    """Send a plain-text email from MAIL_FROM via Outlook SMTP. Raises on failure."""
+    """Send a plain-text email from MAIL_FROM via SMTP. Raises on failure."""
     if not SMTP_PASSWORD:
-        raise RuntimeError("SMTP_PASSWORD is not set on the server (Outlook app password)")
+        raise RuntimeError("SMTP_PASSWORD is not set on the server (an app password)")
     msg = EmailMessage()
     msg["From"] = formataddr((MAIL_FROM_NAME, MAIL_FROM)) if MAIL_FROM_NAME else MAIL_FROM
     msg["To"] = to_addr
@@ -1176,7 +601,7 @@ def send_email(to_addr: str, subject: str, body: str) -> None:
         raise RuntimeError(f"could not send email: {e}")
 
 
-# ---- contact enrichment: infer country + gender, cached + background-filled
+# ---- contact enrichment: infer country + gender, background-filled --------
 ENRICH_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1215,64 +640,35 @@ def _infer_country_gender(item: dict) -> dict:
     }
 
 
-def _load_enrich_cache() -> None:
-    global ENRICH_CACHE
-    try:
-        data = json.loads(ENRICH_FILE.read_text(encoding="utf-8"))
-        ENRICH_CACHE = data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        ENRICH_CACHE = {}
+def _enqueue_rows(rows) -> None:
+    """Queue the contacts on a page for background inference (once per email).
 
-
-def _save_enrich_cache() -> None:
-    try:
-        with ENRICH_LOCK:
-            snapshot = dict(ENRICH_CACHE)
-        ENRICH_FILE.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
-    except OSError as e:
-        print(f"[warn] could not write {ENRICH_FILE.name}: {e}", file=sys.stderr)
-
-
-def _enrichment_for(email: str) -> dict:
-    if not email:
-        return {}
-    with ENRICH_LOCK:
-        return ENRICH_CACHE.get(email) or {}
-
-
-def _enqueue_enrichment(rec: dict) -> None:
-    """Queue a contact for background country/gender inference (once per email)."""
+    Only contacts that have no inference yet are queued, and only ones whose
+    country or gender is still blank -- a GitHub profile that already stated
+    its location does not need Claude to guess at it.
+    """
     if not ENRICH_ENABLED:
         return
-    emails = rec.get("emails") or []
-    if not emails:
-        return
-    key = emails[0]
-    with ENRICH_LOCK:
-        if key in ENRICH_CACHE or key in ENRICH_SEEN:
-            return
-        ENRICH_SEEN.add(key)
-        ENRICH_QUEUE.append({
-            "email": key,
-            "name": rec.get("name") or rec.get("username") or "",
-            "location": rec.get("location") or "",
-            "context": rec.get("preview") or "",
-        })
-
-
-def _apply_enrichment(email: str, enr: dict) -> None:
-    """Write inferred fields onto every in-memory record for this contact."""
-    with DATA_LOCK:
-        for rec in ALL_RECORDS:
-            ems = rec.get("emails") or []
-            if ems and ems[0] == email:
-                rec["country"] = enr.get("country", "")
-                rec["country_code"] = enr.get("country_code", "")
-                rec["gender"] = enr.get("gender", "")
+    for row in rows or []:
+        email = row.get("primary_email") or ""
+        if not email:
+            continue
+        if row.get("country") and row.get("gender"):
+            continue
+        with ENRICH_LOCK:
+            if email in ENRICH_SEEN:
+                continue
+            ENRICH_SEEN.add(email)
+            ENRICH_QUEUE.append({
+                "email": email,
+                "name": row.get("name") or row.get("username") or "",
+                "location": row.get("location") or "",
+                "context": row.get("preview") or "",
+            })
 
 
 def _enrich_worker() -> None:
-    """Drain the queue, infer per contact, cache, and patch loaded records."""
+    """Drain the queue, infer per contact, and store it against the email."""
     while True:
         try:
             item = ENRICH_QUEUE.popleft()
@@ -1280,89 +676,40 @@ def _enrich_worker() -> None:
             time.sleep(0.5)
             continue
         email = item["email"]
-        with ENRICH_LOCK:
-            if email in ENRICH_CACHE:
-                continue
         try:
+            if db.enrichment_has(email):
+                continue
             enr = _infer_country_gender(item)
         except Exception:  # noqa: BLE001 -- transient (rate limit/network); retry later
             with ENRICH_LOCK:
                 ENRICH_SEEN.discard(email)  # allow a future re-enqueue
             time.sleep(1.5)
             continue
-        with ENRICH_LOCK:
-            ENRICH_CACHE[email] = enr
-        _apply_enrichment(email, enr)
-        _save_enrich_cache()
+        try:
+            # Writes the inference AND pushes it onto the contacts it applies to.
+            db.set_enrichment(email, enr)
+            dbquery.invalidate_caches()
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] could not store enrichment for {email}: {e}",
+                  file=sys.stderr)
         time.sleep(0.2)  # gentle throttle
 
 
 # ---- sent-message log: record sends, mark messaged contacts ---------------
-def _load_sent_log() -> None:
-    global SENT_LOG
-    try:
-        data = json.loads(SENT_FILE.read_text(encoding="utf-8"))
-        SENT_LOG = data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        SENT_LOG = {}
-
-
-def _save_sent_log() -> None:
-    try:
-        with SENT_LOCK:
-            snapshot = dict(SENT_LOG)
-        SENT_FILE.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2),
-                             encoding="utf-8")
-    except OSError as e:
-        print(f"[warn] could not write {SENT_FILE.name}: {e}", file=sys.stderr)
-
-
-def _sent_for(emails) -> dict:
-    """Aggregate send history across all of a contact's emails."""
-    out = {"count": 0, "last_sent": "", "to": "", "manual": False}
-    with SENT_LOCK:
-        for e in emails or []:
-            ent = SENT_LOG.get(e)
-            if not ent:
-                continue
-            out["count"] += ent.get("count", 0)
-            if ent.get("last_sent", "") >= out["last_sent"]:
-                out["last_sent"] = ent.get("last_sent", "")
-                out["to"] = e
-                out["manual"] = bool(ent.get("manual"))
-    return out
-
-
-def _set_sent_fields(rec: dict) -> None:
-    snt = _sent_for(rec.get("emails"))
-    rec["messaged"] = snt["count"] > 0
-    rec["messaged_count"] = snt["count"]
-    rec["messaged_at"] = snt["last_sent"]
-    rec["messaged_to"] = snt["to"]
-    rec["messaged_manual"] = snt["manual"]
-
-
-def _apply_sent(email: str) -> None:
-    """Refresh the messaged fields on every in-memory record holding this email."""
-    with DATA_LOCK:
-        for rec in ALL_RECORDS:
-            if email in (rec.get("emails") or []):
-                _set_sent_fields(rec)
-
-
 def _record_sent(to_addr: str, subject: str) -> None:
     """Log a successful send and mark the matching contact(s) as messaged."""
     key = (to_addr or "").strip().lower()
     if not key:
         return
-    with SENT_LOCK:
-        ent = SENT_LOG.get(key) or {"count": 0}
-        ent["count"] = ent.get("count", 0) + 1
-        ent["last_sent"] = _now_iso()
-        ent["last_subject"] = (subject or "").strip()
-        SENT_LOG[key] = ent
-    _save_sent_log()
-    _apply_sent(key)
+    db.execute(
+        "INSERT INTO sent_log (email, send_count, last_sent, last_subject, manual) "
+        "VALUES (%s, 1, %s, %s, 0) "
+        "ON DUPLICATE KEY UPDATE send_count = send_count + 1, "
+        "  last_sent = VALUES(last_sent), last_subject = VALUES(last_subject), "
+        "  manual = 0",
+        (key, _now_iso(), (subject or "").strip()[:512]))
+    db.refresh_sent_for_emails([key])
+    dbquery.invalidate_caches()
 
 
 def _mark_sent(rec_id: str, sent: bool) -> dict | None:
@@ -1372,361 +719,71 @@ def _mark_sent(rec_id: str, sent: bool) -> dict | None:
     of the contact, including real sends -- that is what "unsent" has to mean
     for the badge and the sent/unsent filter to agree with each other.
     """
-    with DATA_LOCK:
-        rec = RECORD_BY_ID.get(rec_id or "")
-    if rec is None:
-        return None
-    emails = [e.strip().lower() for e in (rec.get("emails") or []) if e.strip()]
+    emails = dbquery.contact_emails(rec_id or "")
     if not emails:
         return None
+    _apply_marks([emails], sent)
+    row = dbquery.contact_row(rec_id)
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "messaged": bool(row["messaged_count"]),
+        "messaged_count": row["messaged_count"],
+        "messaged_at": row["messaged_at"] or "",
+        "messaged_to": row["messaged_to"] or "",
+        "messaged_manual": bool(row["messaged_manual"]),
+    }
 
-    with SENT_LOCK:
-        if sent:
-            ent = SENT_LOG.get(emails[0]) or {}
-            if ent.get("count", 0) <= 0:
-                ent = {"count": 1, "last_sent": _now_iso(), "last_subject": "",
-                       "manual": True}
-            SENT_LOG[emails[0]] = ent
-        else:
-            for e in emails:
-                SENT_LOG.pop(e, None)
-    _save_sent_log()
 
-    with DATA_LOCK:
-        _set_sent_fields(rec)
-    for e in emails:
-        _apply_sent(e)  # other records may share one of these addresses
-    return {k: rec.get(k) for k in
-            ("id", "messaged", "messaged_count", "messaged_at", "messaged_to",
-             "messaged_manual")}
+def _apply_marks(email_lists: list[list[str]], sent: bool) -> None:
+    """Set/clear the sent log for a batch of contacts, then refresh their rows."""
+    touched: set[str] = set()
+    if sent:
+        # A manual mark must not overwrite a real send's subject or count --
+        # hence the guarded update rather than a plain REPLACE.
+        rows = [(emails[0], _now_iso()) for emails in email_lists if emails]
+        for email, stamp in rows:
+            db.execute(
+                "INSERT INTO sent_log (email, send_count, last_sent, "
+                "  last_subject, manual) VALUES (%s, 1, %s, '', 1) "
+                "ON DUPLICATE KEY UPDATE "
+                # A real send already recorded here keeps its stamp, its
+                # subject and its non-manual flag. Assignments are evaluated
+                # left to right and see the values assigned before them, so
+                # the two guards on send_count have to come before it is
+                # raised to 1 -- otherwise they always read the new value.
+                "  last_sent = IF(send_count > 0, last_sent, VALUES(last_sent)), "
+                "  manual = IF(send_count > 0, manual, 1), "
+                "  send_count = GREATEST(send_count, 1)",
+                (email, stamp))
+            touched.add(email)
+    else:
+        flat = sorted({e for emails in email_lists for e in emails})
+        for i in range(0, len(flat), 500):
+            chunk = flat[i:i + 500]
+            marks = ", ".join(["%s"] * len(chunk))
+            db.execute(f"DELETE FROM sent_log WHERE email IN ({marks})", chunk)
+            touched.update(chunk)
+    db.refresh_sent_for_emails(touched)
+    dbquery.invalidate_caches()
 
 
 def _mark_sent_many(ids: list[str], sent: bool) -> int:
     """Bulk _mark_sent (the export dialog's "mark all as sent"): same rules,
-    but one log write and one refresh pass instead of one per contact."""
-    with DATA_LOCK:
-        recs = [r for r in (RECORD_BY_ID.get(i or "") for i in ids)
-                if r and r.get("emails")]
-    touched: set[str] = set()
-    with SENT_LOCK:
-        for rec in recs:
-            emails = [e.strip().lower() for e in rec["emails"] if e.strip()]
-            if not emails:
-                continue
-            if sent:
-                ent = SENT_LOG.get(emails[0]) or {}
-                if ent.get("count", 0) <= 0:
-                    SENT_LOG[emails[0]] = {"count": 1, "last_sent": _now_iso(),
-                                           "last_subject": "", "manual": True}
-            else:
-                for e in emails:
-                    SENT_LOG.pop(e, None)
-            touched.update(emails)
-    _save_sent_log()
-    with DATA_LOCK:
-        for rec in ALL_RECORDS:
-            if touched.intersection(rec.get("emails") or ()):
-                _set_sent_fields(rec)
-    return len(recs)
-
-
-_SECONDS_PER_YEAR = 365.25 * 86400
-
-
-def _age_years(rec: dict, now_ts: float) -> float | None:
-    """Account age in years from the join date, or None if it is unknown."""
-    created = rec.get("_created_ts") or 0.0
-    if created <= 0:
-        return None
-    return max(0.0, (now_ts - created) / _SECONDS_PER_YEAR)
-
-
-def _filter_by_date(items: list[dict], op: str, date: str, ts_of) -> list[dict]:
-    """Keep items whose date is after/before a calendar day.
-
-    ``after`` is inclusive, ``before`` exclusive; a record missing the date in
-    question cannot satisfy a condition on it, so it drops out. Shared by the
-    list query and the export dialog so both mean the same thing by "after".
-    """
-    cutoff = _parse_ts(date) if date else 0.0
-    if op not in ("after", "before") or not cutoff:
-        return items
-    if op == "after":
-        return [r for r in items if ts_of(r) >= cutoff]
-    return [r for r in items if 0.0 < ts_of(r) < cutoff]
-
-
-def _facets(items: list[dict], now_ts: float) -> dict:
-    """Counts per country, gender and age band over the given set.
-
-    These describe the set the user is narrowing (source + search + sent), and
-    are computed *before* the country/gender/age filters so the numbers hold
-    steady as those are toggled -- a facet shows how many a choice would match,
-    which is the point of showing the count next to it.
-    """
-    countries: dict[str, dict] = {}
-    genders = {"male": 0, "female": 0, "unknown": 0}
-    ages = {k: 0 for k in ("lt1", "1to3", "3to5", "5to10", "gte10", "unknown")}
-    runs: dict[int, int] = {}
-    for rec in items:
-        name = (rec.get("country") or "").strip()
-        if name and name.lower() != "unknown":
-            entry = countries.setdefault(
-                name, {"name": name, "code": rec.get("country_code") or "", "count": 0})
-            entry["count"] += 1
-        g = (rec.get("gender") or "").strip().lower()
-        genders[g if g in genders else "unknown"] += 1
-        # Step = scrape run number. Run 0 means "the source doesn't number
-        # its runs", which is not a step anyone can meaningfully pick.
-        run = rec.get("run") or 0
-        if run > 0:
-            runs[run] = runs.get(run, 0) + 1
-        age = _age_years(rec, now_ts)
-        if age is None:
-            ages["unknown"] += 1
-        elif age < 1:
-            ages["lt1"] += 1
-        elif age < 3:
-            ages["1to3"] += 1
-        elif age < 5:
-            ages["3to5"] += 1
-        elif age < 10:
-            ages["5to10"] += 1
-        else:
-            ages["gte10"] += 1
-    country_list = sorted(countries.values(),
-                          key=lambda c: (-c["count"], c["name"].lower()))
-    run_list = [{"run": k, "count": v} for k, v in sorted(runs.items())]
-    return {"countries": country_list, "genders": genders, "ages": ages,
-            "runs": run_list}
-
-
-def query_records(source: str, q: str, sort: str, page: int, per_page: int,
-                  messaged: str = "all", country: str = "", gender: str = "",
-                  age_min: str = "", age_max: str = "", runs: str = "",
-                  joined_op: str = "", joined_date: str = "",
-                  active_op: str = "", active_date: str = ""):
-    with DATA_LOCK:
-        items = BY_SOURCE.get(source) if source != "all" else ALL_RECORDS
-        if items is None:  # unknown source -> behave like "all"
-            source = "all"
-            items = ALL_RECORDS
-
-        # Which scrape runs actually exist in this source, judged over the whole
-        # set (before search narrows it). Used to drop a step filter that points
-        # at a run which no longer exists -- e.g. one merged away, leaving a
-        # stale `runs=` in the URL -- so a phantom step falls back to "all"
-        # instead of hiding every contact the user never knowingly filtered out.
-        source_runs = {(r.get("run") or 0) for r in items}
-
-        q = (q or "").strip().lower()
-        if q:
-            terms = q.split()
-            items = [r for r in items if all(t in r["_blob"] for t in terms)]
-
-        # Counts for the sent/unsent filter, over the current source+search set.
-        sent_n = sum(1 for r in items if r.get("messaged"))
-        messaged_counts = {"all": len(items), "sent": sent_n,
-                           "unsent": len(items) - sent_n}
-        # `messaged` is a set of {sent, unsent} (comma-separated). Selecting both
-        # (or neither) is the same as "all" -- no filtering.
-        sel = sorted({m for m in (messaged or "").split(",")
-                      if m in ("sent", "unsent")})
-        if sel == ["sent"]:
-            items = [r for r in items if r.get("messaged")]
-        elif sel == ["unsent"]:
-            items = [r for r in items if not r.get("messaged")]
-        messaged = ",".join(sel) if sel else "all"
-
-        # Facets describe this set (before country/gender/age narrow it).
-        now_ts = datetime.now(timezone.utc).timestamp()
-        facets = _facets(items, now_ts)
-
-        # Country: comma-separated names OR codes, case-insensitive, any-of.
-        wanted_countries = {c.strip().lower() for c in (country or "").split(",")
-                            if c.strip()}
-        if wanted_countries:
-            items = [r for r in items
-                     if (r.get("country") or "").strip().lower() in wanted_countries
-                     or (r.get("country_code") or "").strip().lower() in wanted_countries]
-
-        # Gender: any-of male/female/unknown.
-        wanted_genders = {g.strip().lower() for g in (gender or "").split(",")
-                          if g.strip() in ("male", "female", "unknown")}
-        if wanted_genders:
-            items = [r for r in items
-                     if ((r.get("gender") or "").strip().lower() or "unknown")
-                     in wanted_genders]
-
-        # Step (scrape run number): comma-separated, any-of. Runs that no longer
-        # exist in the data are dropped (see source_runs above), so a stale
-        # selection self-heals to "no step filter" rather than emptying the list.
-        wanted_runs = {_to_int(x.strip(), -1)
-                       for x in (runs or "").split(",") if x.strip()}
-        wanted_runs &= source_runs
-        if wanted_runs:
-            items = [r for r in items if (r.get("run") or 0) in wanted_runs]
-
-        # Joined / last-active calendar windows.
-        items = _filter_by_date(items, joined_op, joined_date,
-                                lambda r: r.get("_created_ts") or 0.0)
-        items = _filter_by_date(items, active_op, active_date,
-                                lambda r: _parse_ts(r.get("activity_at") or ""))
-
-        # Account age in years, min inclusive and max EXCLUSIVE -- so a one-year
-        # band [N, N+1) means "N years old", and the bands tile without overlap
-        # (they match the facet counts). A record whose join date is unknown
-        # cannot satisfy an age bound, so it drops out.
-        lo = _to_float(age_min)
-        hi = _to_float(age_max)
-        age_min = "" if lo is None else str(lo)
-        age_max = "" if hi is None else str(hi)
-        if lo is not None or hi is not None:
-            kept = []
-            for r in items:
-                age = _age_years(r, now_ts)
-                if age is None:
-                    continue
-                if lo is not None and age < lo:
-                    continue
-                if hi is not None and age >= hi:
-                    continue
-                kept.append(r)
-            items = kept
-
-        key_fn, reverse = SORTS.get(sort) or SORTS[DEFAULT_SORT]
-        if sort not in SORTS:
-            sort = DEFAULT_SORT
-        items = sorted(items, key=key_fn, reverse=reverse)
-
-        total = len(items)
-        total_pages = max(1, (total + per_page - 1) // per_page)
-        page = max(1, min(page, total_pages))
-        start = (page - 1) * per_page
-        window = items[start:start + per_page]
-        for r in window:
-            _enqueue_enrichment(r)
-        payload = [{k: r.get(k) for k in PUBLIC_FIELDS} for r in window]
-
-        return {
-            "items": payload,
-            "total": total,
-            "page": page,
-            "per_page": per_page,
-            "total_pages": total_pages,
-            "source": source,
-            "messaged": messaged,
-            "messaged_counts": messaged_counts,
-            "country": ",".join(sorted(wanted_countries)),
-            "gender": ",".join(sorted(wanted_genders)),
-            "runs": ",".join(str(r) for r in sorted(wanted_runs)),
-            "age_min": age_min,
-            "age_max": age_max,
-            "facets": facets,
-            "stats": STATS_BY_SOURCE.get(source, STATS_BY_SOURCE["all"]),
-            "sources": SOURCE_LIST,
-        }
-
-
-def export_records(source: str, gender: str = "", active_op: str = "",
-                   active_date: str = "", joined_op: str = "",
-                   joined_date: str = "", runs: str = "", country: str = "",
-                   messaged: str = "", limit: int = 0):
-    """Rows for the CSV export dialog: filtered, sorted, capped.
-
-    Also returns the option lists (scrape runs, countries) the dialog builds
-    its controls from -- computed over the WHOLE source set, so choices don't
-    vanish from the dialog as the selection narrows. Unlike /api/emails this
-    is not paginated: the preview table IS the file that gets downloaded, so
-    the response must hold every row (bounded by ``limit``).
-    """
-    with DATA_LOCK:
-        items = BY_SOURCE.get(source) or []
-        # An export of "main emails" has no use for a row without one.
-        items = [r for r in items if r.get("emails")]
-
-        run_counts: dict[int, int] = {}
-        country_counts: dict[str, dict] = {}
-        for r in items:
-            run = r.get("run") or 0
-            run_counts[run] = run_counts.get(run, 0) + 1
-            name = (r.get("country") or "").strip()
-            if name:
-                ent = country_counts.setdefault(
-                    name, {"name": name, "code": "", "count": 0})
-                ent["count"] += 1
-                ent["code"] = ent["code"] or (r.get("country_code") or "").strip()
-        options = {
-            "runs": [{"run": k, "count": v}
-                     for k, v in sorted(run_counts.items())],
-            "countries": sorted(country_counts.values(),
-                                key=lambda c: (-c["count"], c["name"].lower())),
-        }
-
-        # Sent/unsent: same contract as /api/emails -- picking both (or
-        # neither) means "all".
-        sel = sorted({m for m in (messaged or "").split(",")
-                      if m in ("sent", "unsent")})
-        if sel == ["sent"]:
-            items = [r for r in items if r.get("messaged")]
-        elif sel == ["unsent"]:
-            items = [r for r in items if not r.get("messaged")]
-
-        # Gender: any-of male/female/unknown (same contract as /api/emails).
-        wanted_genders = {g.strip().lower() for g in (gender or "").split(",")
-                          if g.strip() in ("male", "female", "unknown")}
-        if wanted_genders:
-            items = [r for r in items
-                     if ((r.get("gender") or "").strip().lower() or "unknown")
-                     in wanted_genders]
-
-        # Country: comma-separated names OR codes, case-insensitive, any-of.
-        wanted_countries = {c.strip().lower() for c in (country or "").split(",")
-                            if c.strip()}
-        if wanted_countries:
-            items = [r for r in items
-                     if (r.get("country") or "").strip().lower() in wanted_countries
-                     or (r.get("country_code") or "").strip().lower() in wanted_countries]
-
-        # Date conditions: after/before a calendar day (shared helper, same
-        # inclusive-after / exclusive-before contract as the list filter).
-        items = _filter_by_date(items, active_op, active_date,
-                                lambda r: _parse_ts(r.get("activity_at") or ""))
-        items = _filter_by_date(items, joined_op, joined_date,
-                                lambda r: r.get("_created_ts") or 0.0)
-
-        # Step = scrape run number, any-of.
-        wanted_runs = {_to_int(x.strip(), -1)
-                       for x in (runs or "").split(",") if x.strip()}
-        wanted_runs.discard(-1)
-        if wanted_runs:
-            items = [r for r in items if (r.get("run") or 0) in wanted_runs]
-
-        matched = len(items)
-        items = sorted(items, key=lambda r: r["_ts"], reverse=True)
-        if limit > 0:
-            items = items[:limit]
-
-        # Slim rows: exactly what the preview table and the CSV need. Only the
-        # main email (emails[0], personal-first) is exported -- by design.
-        rows = [{
-            "id": r["id"],
-            "name": r.get("name") or "",
-            "username": r.get("username") or "",
-            "email": r["emails"][0],
-            "gender": r.get("gender") or "",
-            "country": r.get("country") or "",
-            "run": r.get("run") or 0,
-            "created_at": r.get("created_at") or "",
-            "activity_at": r.get("activity_at") or "",
-            "messaged": bool(r.get("messaged")),
-        } for r in items]
-
-        return {"items": rows, "matched": matched, "options": options}
+    but one refresh pass instead of one per contact."""
+    email_lists = []
+    for rec_id in ids:
+        emails = dbquery.contact_emails(rec_id or "")
+        if emails:
+            email_lists.append(emails)
+    if email_lists:
+        _apply_marks(email_lists, sent)
+    return len(email_lists)
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ContactDirectory/3.0"
+    server_version = "ContactDirectory/4.0"
 
     def log_message(self, fmt, *args):  # quieter logging
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -1739,6 +796,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_file(self, path: Path, filename: str) -> None:
+        """Stream a file back as a download (used for the .sql export)."""
+        try:
+            size = path.stat().st_size
+            fh = path.open("rb")
+        except OSError as e:
+            self._send_json({"ok": False, "error": str(e)}, 500)
+            return
+        with fh:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/sql; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            while True:
+                chunk = fh.read(1 << 16)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
 
     def _read_json_body(self) -> dict:
         try:
@@ -1754,6 +833,13 @@ class Handler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, UnicodeDecodeError):
             return {}
 
+    def _read_body_bytes(self) -> bytes:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return b""
+        return self.rfile.read(length) if length > 0 else b""
+
     def do_GET(self):
         parsed = urlparse(self.path)
         route = parsed.path
@@ -1762,35 +848,36 @@ class Handler(BaseHTTPRequestHandler):
         if route in ("/", "/index.html"):
             self._send_json({
                 "service": "email-scrapper data API",
+                "storage": f"mysql://{db.DB_HOST}:{db.DB_PORT}/{db.DB_NAME}",
                 "ui": "Run the Next.js app in web/ (npm run dev); it consumes this API.",
                 "endpoints": [
                     "/api/emails", "/api/email?id=", "/api/export", "/api/stats",
                     "/api/scrape", "/api/scrape/status", "/api/scrape/stop",
                     "/api/message/generate", "/api/message/send",
                     "/api/message/mark", "/api/runs/merge",
+                    "/api/slack/workspaces", "/api/slack/users?ws=",
+                    "/api/db/status", "/api/db/export", "/api/db/import",
+                    "/api/db/import-files",
                 ],
             })
             return
 
         if route == "/api/stats":
             source = params.get("source", ["all"])[0]
-            with DATA_LOCK:
-                self._send_json({
-                    "stats": STATS_BY_SOURCE.get(source, STATS_BY_SOURCE["all"]),
-                    "sources": SOURCE_LIST,
-                })
+            self._send_json({"stats": dbquery.stats_for(source),
+                             "sources": dbquery.source_list()})
             return
 
         if route == "/api/emails":
             page = _to_int(params.get("page", ["1"])[0], 1)
             per_page = _to_int(params.get("per_page", ["12"])[0], 12)
             per_page = max(1, min(per_page, MAX_PER_PAGE))
-            q = params.get("q", [""])[0]
-            sort = params.get("sort", ["newest"])[0]
-            source = params.get("source", ["all"])[0]
-            messaged = params.get("messaged", ["all"])[0]
-            self._send_json(query_records(
-                source, q, sort, page, per_page, messaged,
+            self._send_json(dbquery.query_records(
+                params.get("source", ["all"])[0],
+                params.get("q", [""])[0],
+                params.get("sort", ["newest"])[0],
+                page, per_page,
+                params.get("messaged", ["all"])[0],
                 country=params.get("country", [""])[0],
                 gender=params.get("gender", [""])[0],
                 age_min=params.get("age_min", [""])[0],
@@ -1800,11 +887,12 @@ class Handler(BaseHTTPRequestHandler):
                 joined_date=params.get("joined_date", [""])[0],
                 active_op=params.get("active_op", [""])[0],
                 active_date=params.get("active_date", [""])[0],
+                on_page=_enqueue_rows,
             ))
             return
 
         if route == "/api/export":
-            self._send_json(export_records(
+            self._send_json(dbquery.export_records(
                 params.get("source", ["github"])[0],
                 gender=params.get("gender", [""])[0],
                 active_op=params.get("active_op", [""])[0],
@@ -1814,16 +902,20 @@ class Handler(BaseHTTPRequestHandler):
                 runs=params.get("runs", [""])[0],
                 country=params.get("country", [""])[0],
                 messaged=params.get("messaged", [""])[0],
+                provider=params.get("provider", [""])[0],
                 limit=_to_int(params.get("limit", ["0"])[0], 0),
             ))
             return
 
         if route == "/api/email":
             rec_id = params.get("id", [""])[0]
-            view = detail_record(rec_id)
+            view = dbquery.detail_record(rec_id)
             if view is None:
                 self._send_json({"error": "not found"}, 404)
             else:
+                row = dbquery.contact_row(rec_id)
+                if row:
+                    _enqueue_rows([row])
                 self._send_json(view)
             return
 
@@ -1833,6 +925,37 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(_job_view(source))
             else:
                 self._send_json({"jobs": [_job_view(s["key"]) for s in SOURCES]})
+            return
+
+        if route == "/api/slack/workspaces":
+            self._send_json({"workspaces": dbslack.workspaces(),
+                             "unique_people": dbslack.count_all()})
+            return
+
+        if route == "/api/slack/users":
+            slug = params.get("ws", [""])[0]
+            if not slug:
+                self._send_json({"error": "missing ws"}, 400)
+            else:
+                self._send_json({"ws": slug, "users": dbslack.users(slug)})
+            return
+
+        if route == "/api/db/status":
+            self._send_json(dbdump.status())
+            return
+
+        if route == "/api/db/export":
+            # Written to disk first so the response can carry a Content-Length
+            # and the browser shows real download progress.
+            try:
+                result = dbdump.export_sql(params.get("file", [""])[0] or None)
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(e)}, 500)
+                return
+            if params.get("download", ["1"])[0] in ("1", "true", "yes"):
+                self._send_file(Path(result["path"]), result["filename"])
+            else:
+                self._send_json({"ok": True, **result})
             return
 
         self._send_json({"error": "not found"}, 404)
@@ -1849,13 +972,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/message/generate":
             data = self._read_json_body()
-            with DATA_LOCK:
-                rec = RECORD_BY_ID.get(data.get("id") or "")
-            if rec is None:
+            view = dbquery.detail_record(data.get("id") or "")
+            if view is None:
                 self._send_json({"ok": False, "error": "unknown contact id"}, 404)
                 return
             try:
-                result = generate_message(rec, data.get("intent", ""), data.get("tone", ""))
+                result = generate_message(view, data.get("intent", ""),
+                                          data.get("tone", ""))
                 self._send_json({"ok": True, **result})
             except Exception as e:  # noqa: BLE001 -- surface the reason to the UI
                 self._send_json({"ok": False, "error": str(e)}, 502)
@@ -1882,10 +1005,9 @@ class Handler(BaseHTTPRequestHandler):
             data = self._read_json_body()
             to_addr = (data.get("to") or "").strip()
             if not to_addr and data.get("id"):
-                with DATA_LOCK:
-                    rec = RECORD_BY_ID.get(data["id"])
-                if rec and rec.get("emails"):
-                    to_addr = rec["emails"][0]
+                emails = dbquery.contact_emails(data["id"])
+                if emails:
+                    to_addr = emails[0]
             if not to_addr:
                 self._send_json({"ok": False, "error": "no recipient address"}, 400)
                 return
@@ -1924,42 +1046,70 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(result, status=200 if result.get("ok") else 409)
             return
 
+        if parsed.path == "/api/db/import-files":
+            # One-way import of legacy scraper files, for an archive that
+            # predates the database. Scrapers write straight to MySQL now, so
+            # this is only ever needed once (and does nothing without files).
+            force = params.get("force", ["0"])[0] in ("1", "true", "yes")
+            try:
+                result = dbsync.import_files(force=force, verbose=False)
+                dbquery.invalidate_caches()
+                self._send_json({"ok": True, **result, "db": dbdump.status()})
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(e)}, 500)
+            return
+
+        if parsed.path == "/api/db/import":
+            # Either an uploaded .sql body, or {"path": "..."} naming a file
+            # already on this machine (what `npm run db:import` writes).
+            body = self._read_body_bytes()
+            try:
+                if self.headers.get("Content-Type", "").startswith("application/json"):
+                    data = json.loads(body.decode("utf-8") or "{}")
+                    result = dbdump.import_sql(path=data.get("path") or "")
+                else:
+                    result = dbdump.import_sql(sql_bytes=body)
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(e)}, 400)
+                return
+            # Everything the API had cached describes the old contents.
+            dbquery.invalidate_caches()
+            load_state()
+            self._send_json({"ok": True, **result, "db": dbdump.status()})
+            return
+
         self._send_json({"error": "not found"}, 404)
-
-
-def _to_int(value: str, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _to_float(value: str):
-    """Parse a float, or None for blank/garbage. Negatives clamp to 0."""
-    try:
-        return max(0.0, float(value))
-    except (TypeError, ValueError):
-        return None
 
 
 def main():
     port = _to_int(sys.argv[1], 8000) if len(sys.argv) > 1 else 8000
+
+    # MySQL may still be starting (npm run dev launches us in parallel with it),
+    # so this waits rather than failing.
+    db.bootstrap()
+    # Both are no-ops once the archive is in the database: the scrapers write
+    # there directly, and the legacy files are only read while they still exist
+    # and their table is still empty.
+    dbsync.migrate_legacy_json()
+    dbsync.import_files()
     load_state()
-    _load_enrich_cache()
-    _load_sent_log()
-    load_all()
+    dbquery.invalidate_caches()
+
     addr = ("127.0.0.1", port)
     httpd = ThreadingHTTPServer(addr, Handler)
-    counts = ", ".join(f"{s['key']}={len(BY_SOURCE[s['key']])}" for s in SOURCES)
-    print(f"Loaded {len(ALL_RECORDS)} records ({counts})")
+    counts = ", ".join(f"{s['key']}={dbquery.source_count(s['key'])}"
+                       for s in SOURCES)
+    total = dbquery.source_list()[0]["count"]
+    print(f"Loaded {total} contacts ({counts})")
     msg_gen = "on" if ANTHROPIC_API_KEY else "OFF (set ANTHROPIC_API_KEY)"
     msg_send = "on" if SMTP_PASSWORD else "OFF (set SMTP_PASSWORD)"
     print(f"Messaging: generate={msg_gen}, send={msg_send}, from={MAIL_FROM} "
-          f"({len(SENT_LOG)} recipients messaged)")
+          f"({db.sent_count()} recipients messaged)")
     if ENRICH_ENABLED:
         for _ in range(ENRICH_WORKERS):
             threading.Thread(target=_enrich_worker, daemon=True).start()
-        print(f"Enrichment: on ({len(ENRICH_CACHE)} cached, {ENRICH_WORKERS} workers)")
+        print(f"Enrichment: on ({db.enrichment_count()} cached, "
+              f"{ENRICH_WORKERS} workers)")
     else:
         print("Enrichment: off (needs ANTHROPIC_API_KEY; ENRICH=0 to disable)")
     print(f"Serving on http://{addr[0]}:{addr[1]}  (Ctrl+C to stop)")

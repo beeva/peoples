@@ -28,6 +28,7 @@ from pathlib import Path
 # Make the shared `common` package importable when run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import extract_emails, extract_mailto, fetch  # noqa: E402
+from common.store import RecordStore  # noqa: E402
 
 API = "https://dev.to/api"
 UA = "devto-job-scraper"
@@ -77,30 +78,8 @@ def get_json(url: str):
                  tries=3, none_on=())
 
 
-def load_existing(path: str) -> list[dict]:
-    """Load previously-scraped job posts (the JSON array), or [] if none."""
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return []
-    return data if isinstance(data, list) else []
-
-
-def write_out(path: str, by_id: dict) -> int:
-    """Atomically write the merged posts (newest first). Returns the count.
-
-    Writes to a temp file then renames, so a server reading the file
-    concurrently (for live updates) never sees a half-written array.
-    """
-    merged = sorted(by_id.values(), key=lambda r: r.get("published_at") or "", reverse=True)
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(merged, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
-    return len(merged)
+# Posts are stored one at a time as they are found, so there is no file to
+# rewrite and no window in which a reader could see a half-written array.
 
 
 def scrape_article(stub_id) -> dict | None:
@@ -136,8 +115,8 @@ def main() -> int:
                     help="comma-separated dev.to tags (default: hiring,forhire,jobs)")
     ap.add_argument("--pages", type=int, default=3, help="pages per tag (default: 3)")
     ap.add_argument("--per-page", type=int, default=50, help="articles per page (default: 50)")
-    ap.add_argument("--out", default=str(SCRIPT_DIR / "jobs.json"),
-                    help="output JSON file (default: scrapers/devto/jobs.json)")
+    # Posts go straight into the database, which is also where the resume set
+    # comes from -- there is no output file to name.
     ap.add_argument("--full", action="store_true",
                     help="re-scrape everything (ignore already-saved posts)")
     args = ap.parse_args()
@@ -147,9 +126,8 @@ def main() -> int:
     # Incremental by default: keep already-saved posts and skip their ids.
     # dev.to lists newest-first, so once a whole page is already known we can
     # stop paging that tag -- everything older is known too.
-    existing = [] if args.full else load_existing(args.out)
-    by_id: dict = {r.get("id"): r for r in existing if r.get("id") is not None}
-    known_ids = set(by_id)
+    store = RecordStore("devto")
+    known_ids = set() if args.full else {str(k) for k in store.done_keys()}
     mode = "full re-scrape" if args.full else f"incremental ({len(known_ids)} known)"
     print(f"Scraping dev.to tags=[{', '.join(tags)}] pages={args.pages} "
           f"per_page={args.per_page} -- {mode}", file=sys.stderr)
@@ -169,7 +147,7 @@ def main() -> int:
             new_on_page = 0
             for a in lst:
                 aid = a["id"]
-                if aid in known_ids or aid in stubs:
+                if str(aid) in known_ids or aid in stubs:
                     continue
                 stubs[aid] = a
                 new_on_page += 1
@@ -183,26 +161,26 @@ def main() -> int:
     # 2. Fetch each NEW full article and scan its body for contact info.
     added = 0
     total = len(stubs)
-    for i, stub_id in enumerate(stubs, 1):
-        try:
-            rec = scrape_article(stub_id)
-        except Exception as e:  # noqa: BLE001
-            print(f"  ! article {stub_id}: {e}", file=sys.stderr)
-            continue
-        if rec is not None:
-            by_id[rec["id"]] = rec
-            added += 1
-            # flush after each new hit so progress is visible live + survives a stop
-            write_out(args.out, by_id)
-            print(f"  [{i}/{total}] + contact found: {rec['title'][:60]}", file=sys.stderr)
-        else:
-            print(f"  [{i}/{total}] - no contact", file=sys.stderr)
-        time.sleep(0.25)  # polite throttle
+    with store as out:
+        for i, stub_id in enumerate(stubs, 1):
+            try:
+                rec = scrape_article(stub_id)
+            except Exception as e:  # noqa: BLE001
+                print(f"  ! article {stub_id}: {e}", file=sys.stderr)
+                continue
+            if rec is not None:
+                # Stored as each hit is found, so progress is visible live and
+                # a stopped run keeps what it got.
+                out.add(rec)
+                added += 1
+                print(f"  [{i}/{total}] + contact found: {rec['title'][:60]}",
+                      file=sys.stderr)
+            else:
+                print(f"  [{i}/{total}] - no contact", file=sys.stderr)
+            time.sleep(0.25)  # polite throttle
 
-    # 3. Final write (ensures output exists even when nothing new was found).
-    total_out = write_out(args.out, by_id)
     print(f"\nDone. +{added} new job posts with contact info "
-          f"({total_out} total) -> {args.out}", file=sys.stderr)
+          f"({store.count()} stored in total).", file=sys.stderr)
     return 0
 
 

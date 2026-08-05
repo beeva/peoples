@@ -1,17 +1,16 @@
 import "server-only";
 
-import { readdir, readFile } from "node:fs/promises";
-import path from "node:path";
 import { cache } from "react";
+import { API_BASE_URL } from "@/lib/emails";
 
-/** Directory holding one JSON file per Slack workspace export. */
-const USERS_DIR =
-  process.env.SLACK_USERS_DIR ||
-  path.join(process.cwd(), "..", "scrapers", "slack", "users");
+/** Slack workspace exports come from the data server, like everything else.
+ *
+ *  They used to be read straight off disk on every request. They now live in
+ *  the `slack_users` table; the flattening and cross-workspace grouping below
+ *  is unchanged, it just starts from an API response instead of a file. */
 
 export interface WorkspaceInfo {
-  slug: string; // filename without extension (URL id)
-  file: string; // absolute path
+  slug: string; // workspace id used in the URL
   name: string; // human workspace name
   count: number; // number of users
 }
@@ -164,33 +163,35 @@ function flattenUser(u: Json): Row {
   return out;
 }
 
-function readJson(file: string): Promise<Json[]> {
-  return readFile(file, "utf-8").then((t) => JSON.parse(t) as Json[]);
-}
-
-/** List every workspace file with its display name + user count. */
-export const listWorkspaces = cache(async (): Promise<WorkspaceInfo[]> => {
-  let files: string[];
+/** One workspace's users, whole, in export order. */
+const readWorkspace = cache(async (slug: string): Promise<Json[]> => {
   try {
-    files = (await readdir(USERS_DIR)).filter((f) => f.endsWith(".json"));
+    const res = await fetch(
+      `${API_BASE_URL}/api/slack/users?ws=${encodeURIComponent(slug)}`,
+      { cache: "no-store" },
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as { users?: Json[] };
+    return data.users ?? [];
   } catch {
     return [];
   }
-  const infos = await Promise.all(
-    files.map(async (f) => {
-      const file = path.join(USERS_DIR, f);
-      const users = await readJson(file);
-      const ws = (users[0]?.workspace ?? {}) as Json;
-      return {
-        slug: f.replace(/\.json$/, ""),
-        file,
-        name: (ws.name as string) || f.replace(/\.json$/, ""),
-        count: users.length,
-      };
-    }),
-  );
-  infos.sort((a, b) => a.name.localeCompare(b.name));
-  return infos;
+});
+
+/** Every stored workspace with its display name + user count. */
+export const listWorkspaces = cache(async (): Promise<WorkspaceInfo[]> => {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/slack/workspaces`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { workspaces?: WorkspaceInfo[] };
+    // Already sorted by name server-side; sorting again keeps the ordering a
+    // property of this module rather than of the endpoint.
+    return (data.workspaces ?? []).sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
 });
 
 /** Read every workspace and group users across servers by email. */
@@ -202,7 +203,7 @@ const buildIndex = cache(
     const workspaces = await listWorkspaces();
     const byKey = new Map<string, ServerData[]>();
     for (const w of workspaces) {
-      const users = await readJson(w.file);
+      const users = await readWorkspace(w.slug);
       for (const u of users) {
         const fields = flattenUser(u);
         const email = String(fields["profile.email"] || "").toLowerCase();
