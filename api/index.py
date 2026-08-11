@@ -35,4 +35,22 @@ if os.environ.get("SKIP_BOOTSTRAP", "").strip() != "1":
 # serving a page that reports every source as never having run.
 server.load_state()
 
-handler = server.Handler
+
+class Handler(server.Handler):
+    """The real Handler, with one deployment-specific diagnostic.
+
+    Routing is done on `self.path`, and `vercel.json` rewrites every `/api/*`
+    request to this function. A rewrite is meant to be internal -- the function
+    should still see the original URL -- but if a platform ever delivered the
+    *destination* path instead, every route would 404 with nothing to explain
+    why. Echoing the path that actually arrived turns that from a debugging
+    session into a glance.
+    """
+
+    def _send_json(self, obj, status=200):
+        if status == 404 and isinstance(obj, dict) and obj.get("error") == "not found":
+            obj = {**obj, "received_path": self.path}
+        return super()._send_json(obj, status)
+
+
+handler = Handler

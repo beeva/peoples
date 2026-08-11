@@ -1,7 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
-  "buildCommand": "echo 'no build step: this project is the Python API only'",
-  "outputDirectory": ".",
+  "outputDirectory": "public",
   "rewrites": [{ "source": "/api/(.*)", "destination": "/api/index" }]
 }

@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>email-scrapper API</title>
+<meta name="robots" content="noindex">
+<style>
+  body { font: 15px/1.6 ui-sans-serif, system-ui, sans-serif; max-width: 34rem;
+         margin: 12vh auto; padding: 0 1.5rem; color: #1c1c1c; }
+  code { background: #f2f2f0; padding: .1em .35em; border-radius: 3px; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #111; color: #e6e6e6; } code { background: #262626; }
+  }
+</style>
+<h1>email-scrapper API</h1>
+<p>
+  This host serves the JSON API only. Every endpoint lives under
+  <code>/api/</code> and requires a matching <code>X-Api-Token</code> header;
+  without it the answer is <code>401</code>.
+</p>
+<p>
+  There is no interface here — the directory itself is a separate deployment.
+</p>
+<!--
+  This directory is the project's Vercel output directory, and it exists to be
+  almost empty. Pointing outputDirectory at the repository root instead would
+  publish every file in it -- server.py, db.py, .env.example, the deployment
+  guides -- as static assets on this domain, readable by anyone who guesses a
+  filename. Only what sits in public/ is served; the Python API is built as a
+  serverless function from api/, not from here.
+-->
