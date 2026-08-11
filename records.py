@@ -24,6 +24,7 @@ SCRAPERS_DIR = BASE_DIR / "scrapers"
 # without re-scraping them.
 sys.path.insert(0, str(SCRAPERS_DIR))
 from common import personal_first  # noqa: E402
+from common.phones import extract_phones, merge_phones, phone_first  # noqa: E402
 
 DISCOURSE_FILE = SCRAPERS_DIR / "discourse" / "threejs" / "threejs_emails.jsonl"
 DEVTO_FILE = SCRAPERS_DIR / "devto" / "jobs.json"
@@ -145,7 +146,8 @@ def record(source, local_id, *, emails, name="", username="", title="",
            url="", created_at="", preview_text="", tags=None, location="",
            organization="", apply_links=None, messaging=None, links=None,
            search_extra="", full="", site_url="", activity_at="", run=0,
-           country="", country_code="", gender="", raw=None):
+           country="", country_code="", gender="", raw=None, phones=None,
+           phone_text=""):
     emails = [e.lower() for e in (emails or []) if e]
     seen, uniq = set(), []
     for e in emails:
@@ -159,6 +161,11 @@ def record(source, local_id, *, emails, name="", username="", title="",
         # The scraper's own record, kept whole. Everything below is a lossy
         # projection of it, and the database is the only place it now lives.
         "raw": raw if isinstance(raw, dict) else {},
+        # Phone / WhatsApp numbers, best first. Scrapers may pass ones they
+        # found themselves; `phone_text` is scanned for any the record's own
+        # free text carries.
+        "phones": phone_first(merge_phones(phones or [],
+                                           extract_phones(phone_text))),
         "emails": uniq,
         "name": (name or "").strip(),
         "username": (username or "").strip(),
@@ -223,6 +230,10 @@ def build_discourse(d: dict, i: int) -> dict:
         full=strip_html(d.get("cooked", "")),
         search_extra=d.get("topic_title", ""),
         raw=d,
+        phones=d.get("phones") or [],
+        # The raw HTML, not the stripped text: wa.me / tel: hrefs live in the
+        # markup and are the strongest evidence there is.
+        phone_text=d.get("cooked", "") or "",
     )
 
 
@@ -243,6 +254,12 @@ def build_devto(d: dict, i: int) -> dict:
         apply_links=contact.get("apply_links", []),
         messaging=contact.get("messaging", []),
         raw=d,
+        phones=(contact.get("phones") or []) + (d.get("phones") or []),
+        # `messaging` is where the scraper puts WhatsApp/Telegram links it
+        # found, so it is scanned alongside the post body.
+        phone_text=" ".join([d.get("description") or "",
+                             " ".join(contact.get("messaging") or []),
+                             " ".join(contact.get("apply_links") or [])]),
     )
 
 
@@ -262,6 +279,9 @@ def build_aboutme(d: dict, i: int) -> dict:
         links=norm_links(d.get("links")),
         search_extra=" ".join(d.get("schools", []) + d.get("interests", [])),
         raw=d,
+        phones=d.get("phones") or [],
+        phone_text=" ".join([d.get("summary") or "",
+                             " ".join(norm_links(d.get("links")))]),
     )
 
 
@@ -304,6 +324,11 @@ def build_github(d: dict, i: int) -> dict:
             d.get("country"), d.get("region"), d.get("site_url"), twitter,
         ))),
         raw=d,
+        # A GitHub profile rarely carries a number; the ones that exist come
+        # from the portfolio site, which the phone pass writes back onto the
+        # record as `phones`. The bio is scanned too, for the rare hit.
+        phones=d.get("phones") or [],
+        phone_text=" ".join(filter(None, (bio, d.get("site_url")))),
     )
 
 
@@ -392,6 +417,7 @@ def merge_group(group: list[dict]) -> dict:
     # Latest activity across everything merged into this contact.
     rep["activity_at"] = max((r.get("activity_at") or "" for r in group),
                              default="")
+    rep["phones"] = merge_phones(*(r.get("phones") or [] for r in group))
     rep["tags"] = union("tags")
     rep["apply_links"] = union("apply_links")
     rep["messaging"] = union("messaging")
@@ -412,11 +438,13 @@ def merge_group(group: list[dict]) -> dict:
 
 
 def merge_by_email(recs: list[dict]) -> list[dict]:
-    """Group a source's records so each contact email appears on one row.
+    """Group a source's records so each contact appears on one row.
 
-    Records are linked when they share any email (union-find), so a person who
-    posted the same address across many posts collapses to a single row even if
-    some posts list extra addresses. Records with no email stay on their own.
+    Records are linked when they share any email **or any phone number**
+    (union-find), so a person who posted the same address across many posts
+    collapses to a single row even if some posts list extra addresses -- and a
+    contact reached only by WhatsApp merges the same way. A record sharing
+    neither stays on its own.
     """
     parent = list(range(len(recs)))
 
@@ -431,13 +459,18 @@ def merge_by_email(recs: list[dict]) -> list[dict]:
         if ra != rb:
             parent[rb] = ra
 
-    seen_email: dict[str, int] = {}
+    # One namespace per identifier kind, so an email can never collide with a
+    # number that happens to read the same way.
+    seen: dict[str, int] = {}
     for idx, rec in enumerate(recs):
-        for e in rec["emails"]:
-            if e in seen_email:
-                link(seen_email[e], idx)
+        keys = [f"e:{e}" for e in rec["emails"]]
+        keys += [f"p:{p['number']}" for p in (rec.get("phones") or [])
+                 if p.get("number")]
+        for key in keys:
+            if key in seen:
+                link(seen[key], idx)
             else:
-                seen_email[e] = idx
+                seen[key] = idx
 
     groups: dict[int, list[dict]] = {}
     for idx in range(len(recs)):

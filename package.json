@@ -24,7 +24,12 @@
     "kill": "node scripts/kill-port.js 8000 3090 && node scripts/mysql-server.js --stop",
     "kill:server": "node scripts/kill-port.js 8000",
     "kill:web": "node scripts/kill-port.js 3090",
-    "restart": "npm run kill && npm run dev"
+    "restart": "npm run kill && npm run dev",
+    "scrape:phones": "python scrapers/phone_pass.py",
+    "db:phones": "python dbphones.py backfill",
+    "db:phones:status": "python dbphones.py status",
+    "db:rebuild-contacts": "python -c \"import db,dbsync;db.bootstrap(verbose=False);dbsync.rebuild_contacts()\"",
+    "db:phones:revalidate": "python dbphones.py revalidate"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

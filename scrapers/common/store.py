@@ -71,6 +71,11 @@ class RecordStore:
     def __init__(self, source: str, *, batch: int = 1):
         _load_project_env()
         db.bootstrap(verbose=False)
+        # A scraper is often the first thing run after a schema bump, and the
+        # bump drops the merged contacts. Rebuilding them before writing keeps
+        # the incremental merge working against a full table instead of
+        # silently re-deriving the archive one new record at a time.
+        dbsync.ensure_contacts_rebuilt(verbose=False)
         if source not in dbsync.rec_mod.SOURCE_BY_KEY:
             raise ValueError(f"unknown source: {source}")
         self.source = source

@@ -12,6 +12,12 @@ country's biggest city, ...), so a run that stops early -- and against these
 rate limits they all do -- has still covered every country rather than
 exhausting the first one. See ``search_terms`` in ``regions.py``.
 
+Phone / WhatsApp numbers are collected in the same pass: the site and README
+are fetched for the email anyway, so they are scanned for a number too, at no
+extra request. Only numbers something vouches for are kept -- a wa.me/tel: link,
+a "WhatsApp:" label, or a leading + and a real country code (see
+``common/phones.py``).
+
 For every user we then look for an email in four places, best first:
 
   1. profile   -- the public `email` field (rare, but it is a deliberate invite)
@@ -25,10 +31,11 @@ Each kept user also records `last_activity` -- the most recent of their public
 event feed (catches activity on other people's repos, ~90-day window) and their
 newest repo push -- so the app can show and sort by how recently they were seen.
 
-Only users that land in a target region AND have at least one email are kept,
-which matches the other scrapers in this repo (a contact without an address is
-not a contact). Output is resumable JSONL keyed by login: re-running skips
-users already written, so a stopped run costs nothing to restart.
+Only users that land in a target region AND are contactable are kept -- an
+email **or** a phone / WhatsApp number, which matches the other scrapers in this
+repo (a contact you cannot reach is not a contact). Users go straight into the
+database, keyed by login, and a run asks it what it already holds: re-running
+skips the users already stored, so a stopped run costs nothing to restart.
 
 A GITHUB_TOKEN is effectively required -- unauthenticated search is 10 requests
 per minute (vs 30) and the core API 60 per hour (vs 5000). Create one at
@@ -74,6 +81,7 @@ from common import (  # noqa: E402
     fetch,
     load_env,
 )
+from common.phones import extract_phones, merge_phones, phone_first  # noqa: E402
 from common.store import RecordStore, SkipStore  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -106,7 +114,7 @@ COMMIT_REPOS = 3              # newest non-fork repos to check for a commit emai
 # Rejection reasons stable enough to persist to the skip list. The fine-grained
 # filters (country/age/gender) are left out on purpose: they change run to run,
 # so a "no" under one run's flags must not hide the person from the next.
-PERSISTED_SKIP_REASONS = {"not-a-user", "no-email", "off-region"}
+PERSISTED_SKIP_REASONS = {"not-a-user", "no-contact", "off-region"}
 
 # How hard --shuffle leans on each region. The Americas are the focus, so their
 # queries tend to land earlier in the random order; Europe is weighted lower but
@@ -280,14 +288,22 @@ def site_url_of(blog: str) -> str:
     return blog
 
 
-def scrape_site(url: str, delay: float) -> list[str]:
-    """Fetch a portfolio site and pull emails from it.
+def scrape_site(url: str, delay: float) -> tuple[list[str], list[dict]]:
+    """Fetch a portfolio site and pull emails *and* phone numbers from it.
 
     The homepage first; only if it yields nothing do we try /contact and /about,
     which is where a personal site usually hides the address. Failures are not
-    fatal -- a dead or hostile site just means no emails from this source.
+    fatal -- a dead or hostile site just means no contacts from this source.
+
+    Phones are harvested from the same pages, in the same order, with the same
+    early exit -- so this makes exactly as many requests as it did when it only
+    looked for emails. The page is already in memory; not scanning it for a
+    number would just mean fetching it again later.
     """
-    def emails_at(target: str) -> list[str]:
+    phones: list[dict] = []
+
+    def contacts_at(target: str) -> list[str]:
+        nonlocal phones
         try:
             html = fetch(target, parse="text", ua=UA, tries=2, timeout=20,
                          none_on=(400, 401, 403, 404, 405, 410, 451))
@@ -295,18 +311,21 @@ def scrape_site(url: str, delay: float) -> list[str]:
             return []
         if not html:
             return []
+        # Raw HTML, not stripped text: wa.me and tel: live in href attributes,
+        # which is the strongest evidence a number is real.
+        phones = merge_phones(phones, extract_phones(html))
         return extract_emails(html) + deobfuscated_emails(html)
 
-    found = emails_at(url)
+    found = contacts_at(url)
     if found:
-        return found
+        return found, phone_first(phones)
     base = url.rstrip("/")
     for path in CONTACT_PATHS:
         time.sleep(delay)
-        found = emails_at(base + path)
+        found = contacts_at(base + path)
         if found:
-            return found
-    return []
+            return found, phone_first(phones)
+    return [], phone_first(phones)
 
 
 def user_repos(login: str) -> list[dict]:
@@ -362,17 +381,18 @@ def commit_emails(login: str, repos: list[dict]) -> list[str]:
     return found
 
 
-def readme_emails(login: str) -> list[str]:
-    """Emails typed into the <login>/<login> profile README."""
+def readme_contacts(login: str) -> tuple[list[str], list[dict]]:
+    """Emails and phone numbers typed into the <login>/<login> profile README."""
     url = f"https://raw.githubusercontent.com/{login}/{login}/HEAD/README.md"
     try:
         text = fetch(url, parse="text", ua=UA, tries=2, timeout=20,
                      none_on=(400, 403, 404, 410))
     except Exception:  # noqa: BLE001
-        return []
+        return [], []
     if not text:
-        return []
-    return extract_emails(text) + deobfuscated_emails(text)
+        return [], []
+    return (extract_emails(text) + deobfuscated_emails(text),
+            extract_phones(text))
 
 
 # ---- account age + gender (for the optional --age / --gender filters) -----
@@ -484,7 +504,7 @@ def scrape_user(login: str, *, regions, site_delay: float,
 
     Returns (record, "") for a keeper, or (None, reason) for someone we do not
     want -- "not-a-user" (an org), "off-region", "off-country", "off-age",
-    "off-joined", "off-activity", "no-email", "off-gender". The reason is what
+    "off-joined", "off-activity", "no-contact", "off-gender". The reason is what
     the caller writes to the skip list, and it is only ever a *settled*
     verdict: a rate limit or a network blip raises instead, so a user is never
     written off for a reason that might not be true tomorrow.
@@ -541,13 +561,21 @@ def scrape_user(login: str, *, regions, site_delay: float,
         if not _in_date_bounds(date_ts(last_act), active_after, active_before):
             return None, "off-activity"
 
+    site_emails, site_phones = (scrape_site(site, site_delay)
+                                if (use_site and site) else ([], []))
+    readme_emails_found, readme_phones = (readme_contacts(login)
+                                          if use_readme else ([], []))
     sources = {
         "profile": _clean([prof.get("email") or ""]),
-        "site": _clean(scrape_site(site, site_delay)) if (use_site and site) else [],
-        "readme": _clean((readme_emails(login) if use_readme else [])
+        "site": _clean(site_emails),
+        "readme": _clean(readme_emails_found
                          + extract_emails(bio) + deobfuscated_emails(bio)),
         "commits": _clean(commit_emails(login, repos)) if use_commits else [],
     }
+    # Numbers from every page this scrape already fetched, best first. The bio
+    # is included for the rare profile that carries one.
+    phones = phone_first(merge_phones(site_phones, readme_phones,
+                                      extract_phones(bio)))
     # Best address first, so the primary -- the one the UI offers to write to --
     # is the one a human actually reads. In order: a mailbox they own (gmail,
     # proton) beats a work address, which beats a role desk (support@, info@);
@@ -560,11 +588,14 @@ def scrape_user(login: str, *, regions, site_delay: float,
         key=lambda pair: pair[0],
     )
     emails = _clean([email for _, email in ranked])
-    if not emails:
-        return None, "no-email"
+    # A contact needs a way to reach them, not an email specifically: someone
+    # who published only a WhatsApp number is every bit as contactable as
+    # someone who published only an address.
+    if not emails and not phones:
+        return None, "no-contact"
 
     # Gender last: it costs a Claude call, so only ask for someone who already
-    # cleared region/country/age and has an email. Stored on the record so the
+    # cleared region/country/age and is contactable. Stored on the record so the
     # app can show it without inferring again. When no gender filter is set this
     # never runs -- a plain scrape pays nothing for Claude.
     gender = ""
@@ -594,9 +625,15 @@ def scrape_user(login: str, *, regions, site_delay: float,
         # Reuse the date fetched for the activity filter when it ran.
         "last_activity": (last_act if last_act is not None
                           else last_activity(login, repos)),
-        "email": emails[0],
+        # "" rather than absent when there is no address -- the record shape
+        # stays the same whether the contact was reached by mail or by phone.
+        "email": emails[0] if emails else "",
         "emails": emails,
         "email_sources": {k: v for k, v in sources.items() if v},
+        # Phone / WhatsApp numbers found on the pages this scrape already
+        # fetched. Kept on the record so the store sees them exactly as the
+        # separate phone pass would have written them.
+        "phones": phones,
     }, ""
 
 
@@ -807,7 +844,8 @@ def main() -> int:
         narrowing.append(f"gender={','.join(sorted(genders))}")
     if narrowing:
         print(f"Filters: {'; '.join(narrowing)}", file=sys.stderr)
-    print("Only users with at least one discoverable email are kept.", file=sys.stderr)
+    print("Only users with a discoverable email or phone number are kept.",
+          file=sys.stderr)
 
     store = RecordStore("github")
     done = store.done_keys()
@@ -873,20 +911,22 @@ def main() -> int:
                 # "off-age" and "off-gender" are relative to THIS run's flags --
                 # a later run with different flags would want these people, so
                 # persisting them would wrongly hide them. Those just skip for
-                # the run (they're in `done` above). "not-a-user"/"no-email"/
+                # the run (they're in `done` above). "not-a-user"/"no-contact"/
                 # "off-region" are stable enough to remember across runs.
                 ruled_out += 1
                 if skips and why in PERSISTED_SKIP_REASONS:
-                    skips.write(json.dumps({"login": login, "reason": why}) + "\n")
-                    skips.flush()
+                    skips.add(login, why)
                 return False
             rec["run"] = run_no      # which scrape this user came in on
-            out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            out.flush()
+            out.add(rec)
             kept += 1
-            got = "+".join(rec["email_sources"])
+            got = "+".join(rec["email_sources"]) or "phone"
+            # A user kept for a number alone has no address to show, so the
+            # line names whichever contact they were actually kept for.
+            reach = rec["email"] or (rec["phones"][0]["number"] if rec["phones"]
+                                     else "")
             print(f"  [{kept}/{scanned} scanned] + {login}: "
-                  f"{rec['full_name'] or ''} <{rec['email']}> "
+                  f"{rec['full_name'] or ''} <{reach}> "
                   f"| {rec['country']} | via {got}", file=sys.stderr)
             return True
 

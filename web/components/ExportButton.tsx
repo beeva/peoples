@@ -12,6 +12,8 @@ interface ExportRow {
   username: string;
   email: string;
   provider: string; // mailbox bucket: gmail | outlook | hotmail | personal | company
+  phone: string; // E.164, "" when none was found
+  whatsapp: boolean; // the number was published as a WhatsApp contact
   gender: string;
   country: string;
   run: number; // step (scrape run number)
@@ -26,6 +28,9 @@ interface ExportOptions {
   /** Mailbox buckets, in display order, with how many contacts are in each.
    *  The server owns the keys and labels so both sides can't drift. */
   providers: { key: string; label: string; count: number }[];
+  /** Reachability by number: "phone" (any) and "whatsapp" (the stricter one).
+   *  Same shape and same ownership rule as `providers`. */
+  contactable: { key: string; label: string; count: number }[];
 }
 
 interface ExportData {
@@ -67,14 +72,18 @@ function csvCell(v: string | number): string {
 
 function buildCsv(rows: ExportRow[], providerLabel: (key: string) => string): string {
   const header = [
-    "Name", "Username", "Email", "Provider", "Gender", "Country",
-    "Step", "Sent", "Joined", "Last Active",
+    "Name", "Username", "Email", "Provider", "Phone", "WhatsApp",
+    "Gender", "Country", "Step", "Sent", "Joined", "Last Active",
   ];
   const lines = [header.join(",")];
   for (const r of rows) {
     lines.push(
       [
-        r.name, r.username, r.email, providerLabel(r.provider), r.gender, r.country,
+        r.name, r.username, r.email, providerLabel(r.provider),
+        // Leading apostrophe: spreadsheets otherwise read "+4477..." as a
+        // formula and mangle the number.
+        r.phone ? `'${r.phone}` : "", r.phone ? (r.whatsapp ? "yes" : "no") : "",
+        r.gender, r.country,
         r.run || "", r.messaged ? "yes" : "no", r.created_at, r.activity_at,
       ]
         .map(csvCell)
@@ -108,6 +117,7 @@ export default function ExportButton({
   const [statuses, setStatuses] = useState<Set<string>>(new Set());
   const [genders, setGenders] = useState<Set<string>>(new Set());
   const [providers, setProviders] = useState<Set<string>>(new Set());
+  const [reach, setReach] = useState<Set<string>>(new Set());
   const [runs, setRuns] = useState<Set<number>>(new Set());
   const [countries, setCountries] = useState<Set<string>>(new Set());
   const [countryQuery, setCountryQuery] = useState("");
@@ -144,6 +154,7 @@ export default function ExportButton({
         if (statuses.size) qs.set("messaged", [...statuses].join(","));
         if (genders.size) qs.set("gender", [...genders].join(","));
         if (providers.size) qs.set("provider", [...providers].join(","));
+        if (reach.size) qs.set("contactable", [...reach].join(","));
         if (runs.size) qs.set("runs", [...runs].join(","));
         if (countries.size) qs.set("country", [...countries].join(","));
         const res = await fetch(`/api/export?${qs}`, { cache: "no-store" });
@@ -163,7 +174,7 @@ export default function ExportButton({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, source, count, activeOp, activeDate, joinedOp, joinedDate,
-      statuses, genders, providers, runs, countries, refresh]);
+      statuses, genders, providers, reach, runs, countries, refresh]);
 
   // Close on Escape, like the detail drawer.
   useEffect(() => {
@@ -407,6 +418,30 @@ export default function ExportButton({
                 </div>
 
                 <div className="export-cond">
+                  <span className="facet-label">Reach</span>
+                  {(data?.options.contactable ?? []).map((r) => (
+                    <label
+                      key={r.key}
+                      className={`check-pill${reach.has(r.key) ? " on" : ""}`}
+                      title={
+                        r.key === "whatsapp"
+                          ? "Contacts whose number was published as a WhatsApp contact"
+                          : "Contacts with any phone number"
+                      }
+                    >
+                      <input
+                        type="checkbox"
+                        checked={reach.has(r.key)}
+                        onChange={() => toggle(reach, r.key, setReach)}
+                      />
+                      <span>{r.label}</span>
+                      <span className="check-count">{r.count.toLocaleString()}</span>
+                    </label>
+                  ))}
+                  {!data && <span className="facet-empty">Loading…</span>}
+                </div>
+
+                <div className="export-cond">
                   <span className="facet-label">Step</span>
                   {(data?.options.runs ?? []).map((r) => (
                     <label
@@ -480,6 +515,7 @@ export default function ExportButton({
                       <th>Username</th>
                       <th>Email</th>
                       <th>Provider</th>
+                      <th>Phone</th>
                       <th>Gender</th>
                       <th>Country</th>
                       <th>Step</th>
@@ -496,6 +532,16 @@ export default function ExportButton({
                         <td>{r.username || "—"}</td>
                         <td className="export-email">{r.email}</td>
                         <td>{providerLabel(r.provider) || "—"}</td>
+                        <td>
+                          {r.phone ? (
+                            <span className={`phone-chip${r.whatsapp ? " wa" : ""}`}>
+                              {r.whatsapp ? "WhatsApp " : ""}
+                              {r.phone}
+                            </span>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
                         <td>{r.gender || "—"}</td>
                         <td>{r.country || "—"}</td>
                         <td className="col-num">{r.run || "—"}</td>

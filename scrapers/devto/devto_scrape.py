@@ -28,6 +28,7 @@ from pathlib import Path
 # Make the shared `common` package importable when run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import extract_emails, extract_mailto, fetch  # noqa: E402
+from common.phones import extract_phones  # noqa: E402
 from common.store import RecordStore  # noqa: E402
 
 API = "https://dev.to/api"
@@ -69,7 +70,9 @@ def extract_messaging(text: str) -> list[str]:
 
 
 def has_contact(c: dict) -> bool:
-    return any((c["emails"], c["mailto"], c["apply_links"], c["messaging"]))
+    """Any way to reach whoever posted: an address, a link, or a number."""
+    return any((c["emails"], c["mailto"], c["apply_links"], c["messaging"],
+                c.get("phones")))
 
 
 def get_json(url: str):
@@ -91,6 +94,10 @@ def scrape_article(stub_id) -> dict | None:
         "mailto": extract_mailto(body),
         "apply_links": extract_apply_links(body),
         "messaging": extract_messaging(body),
+        # A "WhatsApp us on +.." job post is as reachable as one with an
+        # address, and hiring posts carry a number far more often than a
+        # profile does. `body_markdown` keeps wa.me / tel: links intact.
+        "phones": extract_phones(body),
     }
     if not has_contact(contact):
         return None

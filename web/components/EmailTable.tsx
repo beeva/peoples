@@ -145,6 +145,38 @@ function Row({
         ) : (
           <span className="muted">—</span>
         )}
+        {record.phone && (
+          // Under the address rather than in its own column: only a small
+          // fraction of contacts have a number, and a mostly-empty column
+          // would cost every row width for the few that fill it.
+          <span className={`phone-chip${record.hasWhatsapp ? " wa" : ""}`}>
+            <a
+              href={
+                record.hasWhatsapp
+                  ? `https://wa.me/${record.phone.replace(/\D/g, "")}`
+                  : `tel:${record.phone}`
+              }
+              target={record.hasWhatsapp ? "_blank" : undefined}
+              rel={record.hasWhatsapp ? "noopener noreferrer" : undefined}
+              title={
+                record.hasWhatsapp
+                  ? "Message on WhatsApp"
+                  : "Call this number"
+              }
+            >
+              {record.hasWhatsapp ? "WhatsApp" : "☎"} {record.phone}
+            </a>
+            <CopyButton value={record.phone} />
+            {record.phoneCount > 1 && (
+              <span
+                className="more"
+                title={record.phones.slice(1).map((p) => p.number).join(", ")}
+              >
+                +{record.phoneCount - 1}
+              </span>
+            )}
+          </span>
+        )}
       </td>
 
       <td className="col-meta">

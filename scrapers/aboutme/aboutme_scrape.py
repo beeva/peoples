@@ -47,6 +47,7 @@ from pathlib import Path
 # Make the shared `common` package importable when run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import extract_emails, fetch  # noqa: E402
+from common.phones import extract_phones  # noqa: E402
 from common.store import RecordStore  # noqa: E402
 
 SITEMAP_INDEX = "https://aboutme-public.s3.amazonaws.com/sitemap/SitemapIndex.xml"
@@ -255,7 +256,8 @@ def main() -> int:
     args = ap.parse_args()
 
     exclude_terms = build_exclude_terms(args.exclude_location)
-    print("Only profiles whose content contains an email are kept.", file=sys.stderr)
+    print("Only profiles whose content offers an email or phone number are kept.",
+          file=sys.stderr)
     if exclude_terms:
         print(f"Filter: excluding locations matching {exclude_terms}", file=sys.stderr)
 
@@ -290,21 +292,31 @@ def main() -> int:
                 continue
             scanned += 1
 
-            # always keep only profiles whose content contains an email
-            if not rec["emails"]:
+            # Keep a profile that offers any way to reach the person: an
+            # email, or a phone / WhatsApp number in the summary or links.
+            # The links are scanned as JSON, exactly as `parse_profile` scans
+            # them for emails -- a wa.me / tel: URL lives in a link's `url`
+            # value, and serialising keeps it intact whatever shape it is in.
+            rec["phones"] = extract_phones(" ".join(filter(None, (
+                rec.get("summary"), json.dumps(rec.get("links") or []),
+            ))))
+            if not rec["emails"] and not rec["phones"]:
                 time.sleep(args.delay)
                 continue
             if location_excluded(rec["locations"], exclude_terms):
                 time.sleep(args.delay)
                 continue
 
-            out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            out.flush()
+            out.add(rec)
             done.add(username)
             kept += 1
             note = f" | {rec['location']}" if rec["location"] else ""
+            # A profile kept for a number alone has no address to show, so the
+            # line names whichever contact it was actually kept for.
+            reach = rec["email"] or (rec["phones"][0]["number"] if rec["phones"]
+                                     else "")
             print(f"  [{kept}/{scanned} scanned] + {username}: {rec['full_name']} "
-                  f"<{rec['email']}>{note}", file=sys.stderr)
+                  f"<{reach}>{note}", file=sys.stderr)
             time.sleep(args.delay)
 
     print(f"\nDone. Kept {kept} matching profiles ({scanned} scanned); "

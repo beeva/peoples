@@ -31,6 +31,7 @@ from pathlib import Path
 import db
 import records as rec_mod
 from common import email_provider
+from common.phones import phone_first
 
 # How much of a file to read per hash update. The GitHub file is 7MB today and
 # only grows, so it is read in chunks rather than slurped.
@@ -123,7 +124,7 @@ def _json_obj(value) -> str:
 
 
 RECORD_COLUMNS = (
-    "id", "source", "local_id", "contact_id", "emails", "raw",
+    "id", "source", "local_id", "contact_id", "emails", "phones", "raw",
     "name", "username", "title",
     "url", "site_url", "location", "organization", "created_at", "activity_at",
     "run", "scraped_country", "scraped_country_code", "scraped_gender",
@@ -132,7 +133,8 @@ RECORD_COLUMNS = (
 )
 
 CONTACT_COLUMNS = (
-    "id", "source", "primary_email", "provider", "emails", "email_count", "name",
+    "id", "source", "primary_email", "provider", "emails", "email_count",
+    "phones", "primary_phone", "phone_count", "has_whatsapp", "name",
     "username", "title", "url", "site_url", "location", "organization",
     "created_at", "activity_at", "run", "preview", "tags", "apply_links",
     "messaging", "links", "posts", "post_count", "ts", "created_ts",
@@ -151,7 +153,7 @@ def _insert_sql(table: str, columns) -> str:
 def _record_row(r: dict, contact_id: str) -> tuple:
     return (
         r["id"], r["source"], r["local_id"], contact_id, _json(r["emails"]),
-        _json_obj(r.get("raw")),
+        _json(r.get("phones")), _json_obj(r.get("raw")),
         r["name"][:255],
         r["username"][:190], r["title"][:512], r["url"][:768], r["site_url"][:768],
         r["location"][:255], r["organization"][:255], r["created_at"],
@@ -171,9 +173,13 @@ def _contact_row(c: dict) -> tuple:
     country = c.get("scraped_country") or ""
     code = c.get("scraped_country_code") or ""
     gender = c.get("scraped_gender") or ""
+    phones = phone_first(c.get("phones") or [])
+    primary_phone = phones[0]["number"] if phones else ""
+    has_whatsapp = 1 if any(p.get("whatsapp") for p in phones) else 0
     return (
         c["id"], c["source"], primary, email_provider(primary),
         _json(emails), len(emails),
+        _json(phones), primary_phone[:24], len(phones), has_whatsapp,
         c["name"][:255], c["username"][:190], c["title"][:512], c["url"][:768],
         c["site_url"][:768], c["location"][:255], c["organization"][:255],
         c["created_at"], c["activity_at"], c["run"], c["preview"],
@@ -191,6 +197,8 @@ def _purge_source(source: str) -> None:
     failure part-way cannot leave rows pointing at a parent that is gone."""
     db.execute("DELETE ce FROM contact_emails ce JOIN contacts c "
                "ON c.id = ce.contact_id WHERE c.source = %s", (source,))
+    db.execute("DELETE cp FROM contact_phones cp JOIN contacts c "
+               "ON c.id = cp.contact_id WHERE c.source = %s", (source,))
     db.execute("DELETE FROM records WHERE source = %s", (source,))
     db.execute("DELETE FROM contacts WHERE source = %s", (source,))
 
@@ -295,6 +303,53 @@ def _sync_appended(entry: dict, meta: dict, fp: dict, started: float,
             "added": counts["added"], "seconds": round(elapsed, 2)}
 
 
+def _touched_contacts(source: str, new_recs: list[dict]) -> list[str]:
+    """Which stored contacts these records can join, bridge, or replace.
+
+    There are three ways a new record reaches one, and all three have to be
+    asked -- the rebuild below deletes a contact before re-inserting it, so a
+    contact it should have claimed and did not is one whose primary key is
+    still taken when the insert comes round:
+
+      * a shared **address** -- the common case;
+      * a shared **number** -- ``merge_by_email`` links on those too, so a
+        person reachable only by WhatsApp has to be found the same way, and two
+        rows that are really one person collapse instead of doubling up;
+      * the record's **own id**, for a record a scraper re-emits. The contact
+        it currently belongs to may share neither an address nor a number with
+        the new version (they changed, or there never were any), and a contact
+        id *is* a record id -- so missing this one is the case that collides.
+    """
+    ids: set[str] = set()
+
+    def lookup(sql: str, values: list) -> None:
+        for i in range(0, len(values), 500):
+            chunk = values[i:i + 500]
+            marks = ", ".join(["%s"] * len(chunk))
+            ids.update(
+                row["contact_id"]
+                for row in db.query(sql.format(marks=marks), [source] + chunk)
+                if row["contact_id"])
+
+    emails = sorted({e for r in new_recs for e in r["emails"]})
+    if emails:
+        lookup("SELECT DISTINCT ce.contact_id FROM contact_emails ce "
+               "JOIN contacts c ON c.id = ce.contact_id "
+               "WHERE c.source = %s AND ce.email IN ({marks})", emails)
+
+    phones = sorted({p["number"] for r in new_recs
+                     for p in (r.get("phones") or []) if p.get("number")})
+    if phones:
+        lookup("SELECT DISTINCT cp.contact_id FROM contact_phones cp "
+               "JOIN contacts c ON c.id = cp.contact_id "
+               "WHERE c.source = %s AND cp.phone IN ({marks})", phones)
+
+    lookup("SELECT DISTINCT r.contact_id FROM records r "
+           "WHERE r.source = %s AND r.id IN ({marks})",
+           sorted({r["id"] for r in new_recs}))
+    return sorted(ids)
+
+
 def ingest_records(source: str, raws: list, first_index: int = 1) -> dict:
     """Store freshly scraped records and fold them into the merged contacts.
 
@@ -318,23 +373,12 @@ def ingest_records(source: str, raws: list, first_index: int = 1) -> dict:
     build = entry["build"]
     new_recs = [build(d, first_index + i) for i, d in enumerate(raws)]
 
-    # A new record joins an existing contact when they share an address, and it
-    # can even bridge two contacts that were separate until now. So the set to
-    # re-merge is the new records plus every record of every contact touching
-    # one of their addresses -- and no further, because within a source an
-    # address belongs to exactly one contact already.
-    emails = sorted({e for r in new_recs for e in r["emails"]})
-    touched_ids: list[str] = []
-    if emails:
-        for i in range(0, len(emails), 500):
-            chunk = emails[i:i + 500]
-            marks = ", ".join(["%s"] * len(chunk))
-            touched_ids += [row["contact_id"] for row in db.query(
-                f"SELECT DISTINCT ce.contact_id FROM contact_emails ce "
-                f"JOIN contacts c ON c.id = ce.contact_id "
-                f"WHERE c.source = %s AND ce.email IN ({marks})",
-                [source] + chunk)]
-    touched_ids = sorted(set(touched_ids))
+    # A new record joins an existing contact when they share an address or a
+    # number, and it can even bridge two contacts that were separate until now.
+    # So the set to re-merge is the new records plus every record of every
+    # contact they touch -- and no further, because within a source an
+    # identifier belongs to exactly one contact already.
+    touched_ids = _touched_contacts(source, new_recs)
 
     # Rebuild those contacts from the records already stored, so the merge sees
     # the same inputs a full rebuild would.
@@ -365,6 +409,8 @@ def ingest_records(source: str, raws: list, first_index: int = 1) -> dict:
             marks = ", ".join(["%s"] * len(chunk))
             db.execute(f"DELETE FROM contact_emails WHERE contact_id IN ({marks})",
                        chunk)
+            db.execute(f"DELETE FROM contact_phones WHERE contact_id IN ({marks})",
+                       chunk)
             db.execute(f"DELETE FROM contacts WHERE id IN ({marks})", chunk)
 
         db.insert_chunked(
@@ -379,12 +425,98 @@ def ingest_records(source: str, raws: list, first_index: int = 1) -> dict:
             "INSERT INTO contact_emails (contact_id, email, pos) VALUES (%s, %s, %s)",
             ((c["id"], e, i) for c in merged for i, e in enumerate(c["emails"])),
         )
+        db.insert_chunked(
+            "INSERT INTO contact_phones (contact_id, phone, whatsapp, via, pos) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            ((c["id"], p["number"], 1 if p.get("whatsapp") else 0,
+              (p.get("via") or "")[:16], i)
+             for c in merged for i, p in enumerate(phone_first(c.get("phones") or []))),
+        )
         total_records = source_record_count(source)
         total_contacts = source_contact_count(source)
 
     _reapply_for_contacts([c["id"] for c in merged])
     return {"added": len(new_recs), "records": total_records,
             "contacts": total_contacts}
+
+
+def rebuild_contacts(source: str = "", verbose: bool = True) -> dict:
+    """Rebuild the merged contacts for a source from ``records``.
+
+    ``contacts`` is a materialised view of the merge, so it can always be
+    thrown away and recomputed from the records themselves -- no files, no
+    network. That is what makes it safe for a schema migration to drop it, and
+    it is the repair path if the merge is ever suspected of being wrong.
+    """
+    sources = [source] if source else [s["key"] for s in rec_mod.STORED_SOURCES]
+    out = {}
+    for key in sources:
+        rows = db.query("SELECT * FROM records WHERE source = %s", (key,))
+        if not rows:
+            out[key] = 0
+            continue
+        recs = [_record_from_row(r) for r in rows]
+        merged = rec_mod.merge_by_email(recs)
+        contact_of = {m: c["id"] for c in merged for m in c["member_ids"]}
+
+        with db.bulk_load(), db.transaction():
+            db.execute("DELETE cp FROM contact_phones cp JOIN contacts c "
+                       "ON c.id = cp.contact_id WHERE c.source = %s", (key,))
+            db.execute("DELETE ce FROM contact_emails ce JOIN contacts c "
+                       "ON c.id = ce.contact_id WHERE c.source = %s", (key,))
+            db.execute("DELETE FROM contacts WHERE source = %s", (key,))
+            db.insert_chunked(
+                _insert_sql("contacts", CONTACT_COLUMNS),
+                (_contact_row(c) for c in merged))
+            db.insert_chunked(
+                "INSERT INTO contact_emails (contact_id, email, pos) "
+                "VALUES (%s, %s, %s)",
+                ((c["id"], e, i) for c in merged
+                 for i, e in enumerate(c["emails"])))
+            db.insert_chunked(
+                "INSERT INTO contact_phones (contact_id, phone, whatsapp, via, pos) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                ((c["id"], p["number"], 1 if p.get("whatsapp") else 0,
+                  (p.get("via") or "")[:16], i)
+                 for c in merged
+                 for i, p in enumerate(phone_first(c.get("phones") or []))))
+            # records.contact_id points at the contact each record merged into;
+            # the ids can change when the merge is recomputed.
+            db.insert_chunked(
+                "UPDATE records SET contact_id = %s WHERE id = %s",
+                [(cid, rid) for rid, cid in contact_of.items()])
+
+        db.apply_all_enrichment(key)
+        db.refresh_all_sent(key)
+        out[key] = len(merged)
+        if verbose:
+            print(f"[rebuild] {key}: {len(rows)} records -> {len(merged)} contacts")
+    if not source:
+        # Every source has just been recomputed, which is exactly what the flag
+        # asks for. Clearing it here means any entry point can satisfy it by
+        # calling this, rather than each having to remember the second half.
+        db.clear_contacts_rebuild_flag()
+    return out
+
+
+def ensure_contacts_rebuilt(verbose: bool = True) -> bool:
+    """Recompute the merged contacts if a schema migration dropped them.
+
+    ``contacts`` is a materialised view of ``records``, so a migration is free
+    to drop it -- but only the merge can put it back, and ``db.bootstrap`` (the
+    thing that migrates) cannot call the merge without importing this module
+    into its own importer. So the flag is left for whoever boots next, and
+    every entry point that boots the database asks this: the server, the
+    scrapers through ``RecordStore``, and the phone tools. Without it, being
+    the first to run after a version bump means serving an empty archive.
+    """
+    if not db.contacts_need_rebuild():
+        return False
+    if verbose:
+        print("[db] rebuilding merged contacts after a schema change",
+              file=sys.stderr)
+    rebuild_contacts(verbose=verbose)
+    return True
 
 
 def source_record_count(source: str) -> int:
@@ -460,6 +592,7 @@ def _record_from_row(row: dict) -> dict:
     return {
         "id": row["id"], "source": row["source"], "local_id": row["local_id"],
         "emails": jload(row["emails"]),
+        "phones": jload(row.get("phones")),
         "raw": jload(row.get("raw")) or {},
         "name": row["name"], "username": row["username"],
         "title": row["title"], "url": row["url"], "site_url": row["site_url"],
@@ -565,6 +698,13 @@ def _sync_source_locked(entry: dict, source: str, force: bool,
         db.insert_chunked(
             "INSERT INTO contact_emails (contact_id, email, pos) VALUES (%s, %s, %s)",
             ((c["id"], e, i) for c in contacts for i, e in enumerate(c["emails"])),
+        )
+        db.insert_chunked(
+            "INSERT INTO contact_phones (contact_id, phone, whatsapp, via, pos) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            ((c["id"], p["number"], 1 if p.get("whatsapp") else 0,
+              (p.get("via") or "")[:16], i)
+             for c in contacts for i, p in enumerate(phone_first(c.get("phones") or []))),
         )
         _write_sync_meta(source, entry["file"], fp, len(raw), len(contacts))
 

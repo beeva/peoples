@@ -34,6 +34,7 @@ PUBLIC_FIELDS = (
     "created_at", "activity_at", "run", "preview", "tags", "location",
     "organization", "apply_links", "messaging", "links", "posts", "post_count",
     "country", "country_code", "gender",
+    "phones", "phone", "phone_count", "has_whatsapp",
     "messaged", "messaged_count", "messaged_at", "messaged_to", "messaged_manual",
 )
 
@@ -153,6 +154,23 @@ def _add_gender(w: Where, wanted: set[str]) -> None:
           f"IN ({marks})", *sorted(wanted))
 
 
+def _add_contactable(w: Where, wanted: set) -> None:
+    """Narrow to contacts reachable by phone / WhatsApp.
+
+    Any-of, like the other pills: picking both means "has either", and picking
+    neither means no filtering. "whatsapp" is the stricter of the two -- it
+    means the number was published as a WhatsApp contact, not merely that one
+    exists.
+    """
+    if not wanted:
+        return
+    if wanted == {"whatsapp"}:
+        w.add("c.has_whatsapp = 1")
+    else:
+        # {"phone"} or both: any number at all.
+        w.add("c.phone_count > 0")
+
+
 def _add_runs(w: Where, wanted: set[int]) -> None:
     if not wanted:
         return
@@ -219,6 +237,12 @@ def contact_payload(row: dict) -> dict:
         "country": row.get("country") or "",
         "country_code": row.get("country_code") or "",
         "gender": row.get("gender") or "",
+        # Numbers best-first: a WhatsApp number leads, because it is a channel
+        # the person published to be contacted on.
+        "phones": _jload(row.get("phones")),
+        "phone": row.get("primary_phone") or "",
+        "phone_count": row.get("phone_count") or 0,
+        "has_whatsapp": bool(row.get("has_whatsapp")),
         "messaged": bool(row.get("messaged_count") or 0),
         "messaged_count": row.get("messaged_count") or 0,
         "messaged_at": row.get("messaged_at") or "",
@@ -338,6 +362,8 @@ def _facets(w: Where, now_ts: float) -> dict:
         f"  SUM(LOWER(c.gender) = 'male') AS male, "
         f"  SUM(LOWER(c.gender) = 'female') AS female, "
         f"  SUM(c.gender = '' OR LOWER(c.gender) NOT IN ('male','female')) AS unknown, "
+        f"  SUM(c.phone_count > 0) AS with_phone, "
+        f"  SUM(c.has_whatsapp = 1) AS with_whatsapp, "
         f"  SUM(c.created_ts <= 0) AS a_unknown, "
         f"  SUM(c.created_ts > 0 AND c.created_ts >  %s) AS a_lt1, "
         f"  SUM(c.created_ts > 0 AND c.created_ts <= %s AND c.created_ts > %s) AS a_1to3, "
@@ -355,6 +381,7 @@ def _facets(w: Where, now_ts: float) -> dict:
         return int(row.get(key) or 0)
 
     genders = {"male": n("male"), "female": n("female"), "unknown": n("unknown")}
+    contactable = {"phone": n("with_phone"), "whatsapp": n("with_whatsapp")}
     ages = {"lt1": n("a_lt1"), "1to3": n("a_1to3"), "3to5": n("a_3to5"),
             "5to10": n("a_5to10"), "gte10": n("a_gte10"),
             "unknown": n("a_unknown")}
@@ -367,7 +394,7 @@ def _facets(w: Where, now_ts: float) -> dict:
         w.params)]
 
     return {"countries": countries, "genders": genders, "ages": ages,
-            "runs": runs}
+            "runs": runs, "contactable": contactable}
 
 
 # ---- the list -------------------------------------------------------------
@@ -376,7 +403,7 @@ def query_records(source: str, q: str, sort: str, page: int, per_page: int,
                   age_min: str = "", age_max: str = "", runs: str = "",
                   joined_op: str = "", joined_date: str = "",
                   active_op: str = "", active_date: str = "",
-                  on_page=None):
+                  contactable: str = "", on_page=None):
     if source != "all" and source not in rec_mod.SOURCE_BY_KEY:
         source = "all"  # unknown source -> behave like "all"
 
@@ -432,6 +459,10 @@ def query_records(source: str, q: str, sort: str, page: int, per_page: int,
                    if x.strip()} & source_runs
     _add_runs(filtered, wanted_runs)
 
+    wanted_contactable = {c.strip().lower() for c in (contactable or "").split(",")
+                          if c.strip().lower() in ("phone", "whatsapp")}
+    _add_contactable(filtered, wanted_contactable)
+
     _add_date(filtered, "c.created_ts", joined_op, joined_date)
     _add_date(filtered, "c.activity_ts", active_op, active_date)
 
@@ -474,6 +505,7 @@ def query_records(source: str, q: str, sort: str, page: int, per_page: int,
         "country": ",".join(sorted(wanted_countries)),
         "gender": ",".join(sorted(wanted_genders)),
         "runs": ",".join(str(r) for r in sorted(wanted_runs)),
+        "contactable": ",".join(sorted(wanted_contactable)),
         "age_min": age_min,
         "age_max": age_max,
         "facets": facets,
@@ -515,7 +547,8 @@ def contact_emails(rec_id: str) -> list[str]:
 def export_records(source: str, gender: str = "", active_op: str = "",
                    active_date: str = "", joined_op: str = "",
                    joined_date: str = "", runs: str = "", country: str = "",
-                   messaged: str = "", provider: str = "", limit: int = 0):
+                   messaged: str = "", provider: str = "",
+                   contactable: str = "", limit: int = 0):
     """Rows for the CSV export dialog: filtered, sorted, capped.
 
     Also returns the option lists (scrape runs, countries, providers) the
@@ -524,9 +557,11 @@ def export_records(source: str, gender: str = "", active_op: str = "",
     list this is not paginated: the preview table IS the file that gets
     downloaded, so the response holds every row (bounded by ``limit``).
     """
-    # An export of "main emails" has no use for a row without one.
+    # A row is worth exporting when it carries some way to reach the person --
+    # an address or a number. Requiring an address would drop the contacts that
+    # published only a WhatsApp number.
     base = _base_where(source)
-    base.add("c.primary_email <> ''")
+    base.add("(c.primary_email <> '' OR c.phone_count > 0)")
 
     options = {
         "runs": [{"run": int(r["run"]), "count": int(r["n"])} for r in db.query(
@@ -549,6 +584,16 @@ def export_records(source: str, gender: str = "", active_op: str = "",
     options["providers"] = [{"key": k, "label": label,
                              "count": provider_counts.get(k, 0)}
                             for k, label in EMAIL_PROVIDERS]
+    reach = db.query_one(
+        f"SELECT SUM(c.phone_count > 0) AS with_phone, "
+        f"       SUM(c.has_whatsapp = 1) AS with_whatsapp "
+        f"FROM contacts c WHERE {base.sql}", base.params) or {}
+    options["contactable"] = [
+        {"key": "phone", "label": "Has phone",
+         "count": int(reach.get("with_phone") or 0)},
+        {"key": "whatsapp", "label": "On WhatsApp",
+         "count": int(reach.get("with_whatsapp") or 0)},
+    ]
 
     w = base.clone()
     # Sent/unsent: same contract as the list -- picking both (or neither)
@@ -575,12 +620,15 @@ def export_records(source: str, gender: str = "", active_op: str = "",
                    if x.strip()}
     wanted_runs.discard(-1)
     _add_runs(w, wanted_runs)
+    _add_contactable(w, {c.strip().lower() for c in (contactable or "").split(",")
+                         if c.strip().lower() in ("phone", "whatsapp")})
 
     matched = int(db.scalar(f"SELECT COUNT(*) AS n FROM contacts c "
                             f"WHERE {w.sql}", w.params, default=0))
 
     sql = (f"SELECT c.id, c.name, c.username, c.primary_email, c.provider, "
            f"c.gender, c.country, c.run, c.created_at, c.activity_at, "
+           f"c.primary_phone, c.has_whatsapp, c.phone_count, "
            f"c.messaged_count FROM contacts c WHERE {w.sql} "
            f"ORDER BY c.ts DESC, c.id ASC")
     params = list(w.params)
@@ -601,6 +649,8 @@ def export_records(source: str, gender: str = "", active_op: str = "",
         "run": r["run"] or 0,
         "created_at": r["created_at"] or "",
         "activity_at": r["activity_at"] or "",
+        "phone": r["primary_phone"] or "",
+        "whatsapp": bool(r["has_whatsapp"]),
         "messaged": bool(r["messaged_count"]),
     } for r in db.query(sql, params)]
 

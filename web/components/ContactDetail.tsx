@@ -145,6 +145,36 @@ export default function ContactDetail({ record }: { record: EmailDetail }) {
         </div>
       )}
 
+      {record.phones.length > 0 && (
+        <div className="emails">
+          {record.phones.map((p) => (
+            <span
+              className={`phone-chip${p.whatsapp ? " wa" : ""}`}
+              key={p.number}
+            >
+              <a
+                href={
+                  p.whatsapp
+                    ? `https://wa.me/${p.number.replace(/\D/g, "")}`
+                    : `tel:${p.number}`
+                }
+                target={p.whatsapp ? "_blank" : undefined}
+                rel={p.whatsapp ? "noopener noreferrer" : undefined}
+              >
+                {p.whatsapp ? "WhatsApp" : "☎"} {p.number}
+              </a>
+              <CopyButton value={p.number} />
+              {/* Where the number came from: a wa.me link is a much warmer
+                  lead than one found loose in a bio, and that is worth
+                  showing rather than flattening away. */}
+              <span className="phone-via" title={`found via ${p.via}`}>
+                {p.via}
+              </span>
+            </span>
+          ))}
+        </div>
+      )}
+
       {record.tags.length > 0 && (
         <div className="tags">
           {record.tags.map((tag) => (

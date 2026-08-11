@@ -35,6 +35,7 @@ from pathlib import Path
 # Make the shared `common` package importable when run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import extract_emails, fetch  # noqa: E402
+from common.phones import extract_phones  # noqa: E402
 from common.store import RecordStore  # noqa: E402
 
 DEFAULT_BASE = "https://discourse.threejs.org"
@@ -138,14 +139,21 @@ def scrape_topic(base: str, topic_id: int, batch: int, delay: float) -> dict | N
 
 
 def build_contacts(base: str, rec: dict) -> list[dict]:
-    """One record per post that contains an email, with full post+topic context."""
+    """One record per post that carries a contact, with full post+topic context.
+
+    A contact is an email *or* a phone / WhatsApp number -- a post offering only
+    a number is as reachable as one offering only an address.
+    """
     contacts = []
     for p in rec["posts"]:
-        emails = extract_emails(p.get("cooked") or "")
-        if not emails:
+        cooked = p.get("cooked") or ""
+        emails = extract_emails(cooked)
+        phones = extract_phones(cooked)
+        if not emails and not phones:
             continue
         contacts.append({
             "emails": emails,
+            "phones": phones,
             "topic_id": rec["topic_id"],
             "topic_title": rec["title"],
             "topic_url": rec["url"],

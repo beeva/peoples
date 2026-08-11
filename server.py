@@ -721,7 +721,10 @@ def _mark_sent(rec_id: str, sent: bool) -> dict | None:
     """
     emails = dbquery.contact_emails(rec_id or "")
     if not emails:
-        return None
+        # The sent log is keyed by recipient address, so a contact reachable
+        # only by phone has nothing to key on. Distinguished from "no such
+        # contact" by the caller, which would otherwise report the wrong thing.
+        return {"_no_email": True} if dbquery.contact_row(rec_id or "") else None
     _apply_marks([emails], sent)
     row = dbquery.contact_row(rec_id)
     if row is None:
@@ -887,6 +890,7 @@ class Handler(BaseHTTPRequestHandler):
                 joined_date=params.get("joined_date", [""])[0],
                 active_op=params.get("active_op", [""])[0],
                 active_date=params.get("active_date", [""])[0],
+                contactable=params.get("contactable", [""])[0],
                 on_page=_enqueue_rows,
             ))
             return
@@ -903,6 +907,7 @@ class Handler(BaseHTTPRequestHandler):
                 country=params.get("country", [""])[0],
                 messaged=params.get("messaged", [""])[0],
                 provider=params.get("provider", [""])[0],
+                contactable=params.get("contactable", [""])[0],
                 limit=_to_int(params.get("limit", ["0"])[0], 0),
             ))
             return
@@ -997,6 +1002,9 @@ class Handler(BaseHTTPRequestHandler):
             view = _mark_sent(data.get("id") or "", bool(data.get("sent")))
             if view is None:
                 self._send_json({"ok": False, "error": "unknown contact id"}, 404)
+            elif view.get("_no_email"):
+                self._send_json({"ok": False, "error": "this contact has no email "
+                                 "address -- the sent log is keyed by address"}, 409)
             else:
                 self._send_json({"ok": True, **view})
             return
@@ -1092,6 +1100,9 @@ def main():
     # and their table is still empty.
     dbsync.migrate_legacy_json()
     dbsync.import_files()
+    # A schema migration drops the merged contacts (they are a view of
+    # `records`); recomputing them is the one thing it cannot do itself.
+    dbsync.ensure_contacts_rebuilt()
     load_state()
     dbquery.invalidate_caches()
 

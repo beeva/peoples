@@ -7,6 +7,13 @@ import { dateActive, hasActiveFilter } from "@/lib/filters";
 import { flagEmoji } from "@/lib/display";
 import MergeRuns from "./MergeRuns";
 
+// Reachability pills. "On WhatsApp" is the stricter claim: the number was
+// published as a WhatsApp contact, not merely found alongside one.
+const REACH = [
+  { key: "phone", label: "Has phone" },
+  { key: "whatsapp", label: "On WhatsApp" },
+] as const;
+
 const GENDERS: { key: "male" | "female" | "unknown"; label: string }[] = [
   { key: "male", label: "Male" },
   { key: "female", label: "Female" },
@@ -91,6 +98,7 @@ export default function FacetFilters({
       v ? params.set(k, v) : params.delete(k);
     set("country", next.countries.join(","));
     set("gender", next.genders.join(","));
+    set("contactable", next.contactable.join(","));
     set("runs", next.runs.join(","));
     const ageOn = next.ageOp !== "" && next.ageValue.trim() !== "";
     set("age_op", ageOn ? next.ageOp : "");
@@ -149,6 +157,7 @@ export default function FacetFilters({
       countries: [],
       genders: [],
       runs: [],
+      contactable: [],
       ageOp: "",
       ageValue: "",
       joinedOp: "",
@@ -163,6 +172,7 @@ export default function FacetFilters({
   const activeCount =
     filter.countries.length +
     filter.genders.length +
+    filter.contactable.length +
     filter.runs.length +
     (filter.ageOp && filter.ageValue ? 1 : 0) +
     (dateActive(filter.joinedOp, filter.joinedDate) ? 1 : 0) +
@@ -308,6 +318,33 @@ export default function FacetFilters({
               <span>{g.label}</span>
               <span className="check-count">
                 {(genderCounts[g.key] ?? 0).toLocaleString()}
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="facet-row">
+        <span className="facet-label">Reach</span>
+        <div className="facet-controls">
+          {REACH.map((r) => (
+            <label
+              key={r.key}
+              className={`check-pill${filter.contactable.includes(r.key) ? " on" : ""}`}
+            >
+              <input
+                type="checkbox"
+                checked={filter.contactable.includes(r.key)}
+                onChange={() =>
+                  apply({
+                    ...filter,
+                    contactable: toggleIn(filter.contactable, r.key),
+                  })
+                }
+              />
+              <span>{r.label}</span>
+              <span className="check-count">
+                {(facets.contactable?.[r.key] ?? 0).toLocaleString()}
               </span>
             </label>
           ))}

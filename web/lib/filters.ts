@@ -17,6 +17,8 @@ export interface Facets {
   ages: Record<string, number>;
   /** Contacts per scrape run ("step"); only runs > 0 are listed. */
   runs: { run: number; count: number }[];
+  /** How many contacts are reachable by phone, and by WhatsApp specifically. */
+  contactable: { phone: number; whatsapp: number };
 }
 
 /** Compare account age (years on GitHub) against a single value. */
@@ -30,6 +32,7 @@ export interface FacetFilter {
   countries: string[]; // country names or codes
   genders: string[]; // male | female | unknown
   runs: string[]; // scrape run numbers ("steps"), multi
+  contactable: string[]; // phone | whatsapp -- reachable by number
   ageOp: AgeOp; // over N / exactly N / less than N years old
   ageValue: string; // whole years; "" when ageOp is ""
   joinedOp: DateOp; // joined after/before a date
@@ -42,6 +45,7 @@ export const EMPTY_FILTER: FacetFilter = {
   countries: [],
   genders: [],
   runs: [],
+  contactable: [],
   ageOp: "",
   ageValue: "",
   joinedOp: "",
@@ -64,6 +68,7 @@ export function hasActiveFilter(f: FacetFilter): boolean {
   return (
     f.countries.length > 0 ||
     f.genders.length > 0 ||
+    f.contactable.length > 0 ||
     f.runs.length > 0 ||
     ageActive(f) ||
     dateActive(f.joinedOp, f.joinedDate) ||
@@ -93,6 +98,7 @@ export function parseFilter(sp: {
   country?: string | string[];
   gender?: string | string[];
   runs?: string | string[];
+  contactable?: string | string[];
   age_op?: string | string[];
   age?: string | string[];
   joined_op?: string | string[];
@@ -129,6 +135,9 @@ export function parseFilter(sp: {
     countries: csvList(sp.country),
     genders,
     runs: csvList(sp.runs).filter((r) => /^\d+$/.test(r)),
+    contactable: csvList(sp.contactable).filter((c) =>
+      ["phone", "whatsapp"].includes(c),
+    ),
     ageOp: ageValue ? ageOp : "",
     ageValue: ageOp ? ageValue : "",
     joinedOp: joined.op,

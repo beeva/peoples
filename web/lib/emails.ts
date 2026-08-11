@@ -60,12 +60,27 @@ export interface EmailRecord {
   country: string;
   countryCode: string;
   gender: string;
+  /** Numbers found for this contact, best first (WhatsApp leads). */
+  phones: Phone[];
+  /** The one to message -- phones[0], or "" if there is none. */
+  phone: string;
+  phoneCount: number;
+  /** At least one number was published *as* a WhatsApp contact. */
+  hasWhatsapp: boolean;
   messaged: boolean;
   messagedCount: number;
   messagedAt: string;
   messagedTo: string;
   /** True when the sent flag was set by hand, not by an actual send. */
   messagedManual: boolean;
+}
+
+export interface Phone {
+  number: string;
+  /** Published as a WhatsApp contact, not merely a number that might work. */
+  whatsapp: boolean;
+  /** What vouched for it: wa-link, tel-link, label or intl. */
+  via: string;
 }
 
 export interface Stats {
@@ -166,6 +181,10 @@ interface RawItem {
   country?: string;
   country_code?: string;
   gender?: string;
+  phones?: { number?: string; whatsapp?: boolean; via?: string }[];
+  phone?: string;
+  phone_count?: number;
+  has_whatsapp?: boolean;
   messaged?: boolean;
   messaged_count?: number;
   messaged_at?: string;
@@ -208,6 +227,7 @@ interface RawResponse {
     genders?: { male?: number; female?: number; unknown?: number };
     ages?: Record<string, number>;
     runs?: { run?: number; count?: number }[];
+    contactable?: { phone?: number; whatsapp?: number };
   };
   stats?: RawStats;
   sources?: RawSource[];
@@ -244,6 +264,16 @@ function mapItem(it: RawItem, idx: number): EmailRecord {
     country: it.country ?? "",
     countryCode: it.country_code ?? "",
     gender: it.gender ?? "",
+    phones: Array.isArray(it.phones)
+      ? it.phones.map((p) => ({
+          number: p.number ?? "",
+          whatsapp: Boolean(p.whatsapp),
+          via: p.via ?? "",
+        }))
+      : [],
+    phone: it.phone ?? "",
+    phoneCount: it.phone_count ?? 0,
+    hasWhatsapp: Boolean(it.has_whatsapp),
     messaged: Boolean(it.messaged),
     messagedCount: it.messaged_count ?? 0,
     messagedAt: it.messaged_at ?? "",
@@ -325,6 +355,8 @@ export async function fetchEmails(
   if (messaged !== "all") params.set("messaged", messaged);
   if (filter.countries.length) params.set("country", filter.countries.join(","));
   if (filter.genders.length) params.set("gender", filter.genders.join(","));
+  if (filter.contactable.length)
+    params.set("contactable", filter.contactable.join(","));
   if (filter.runs.length) params.set("runs", filter.runs.join(","));
   const { min, max } = ageToRange(filter);
   if (min) params.set("age_min", min);
@@ -396,6 +428,7 @@ const EMPTY_FACETS: Facets = {
   genders: { male: 0, female: 0, unknown: 0 },
   ages: {},
   runs: [],
+  contactable: { phone: 0, whatsapp: 0 },
 };
 
 function mapFacets(f: RawResponse["facets"]): Facets {
@@ -413,6 +446,10 @@ function mapFacets(f: RawResponse["facets"]): Facets {
       unknown: f?.genders?.unknown ?? 0,
     },
     ages: f?.ages ?? {},
+    contactable: {
+      phone: f?.contactable?.phone ?? 0,
+      whatsapp: f?.contactable?.whatsapp ?? 0,
+    },
     runs: (f?.runs ?? [])
       .map((r) => ({ run: r.run ?? 0, count: r.count ?? 0 }))
       .filter((r) => r.run > 0),

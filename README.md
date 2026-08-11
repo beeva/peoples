@@ -16,21 +16,24 @@ db/
   data/                        # its data directory (created on first run)
 
 scrapers/
-  common/                      # shared engine: HTTP retry/back-off, email
-    http.py                    #   extraction, and the DB write handle
+  common/                      # shared engine: HTTP retry/back-off, email and
+    http.py                    #   phone extraction, and the DB write handle
     emails.py
+    phones.py                  #   phone / WhatsApp numbers -- E.164, strict
     store.py                   #   RecordStore / SkipStore -- straight to MySQL
   devto/       devto_scrape.py       # dev.to job-post contacts
   discourse/   discourse_scrape.py   # reusable Discourse forum scraper
   aboutme/     aboutme_scrape.py     # about.me public profiles
   github/      github_scrape.py      # GitHub profiles + portfolio sites
                regions.py            #   US / Europe / South America filter
+  phone_pass.py                # revisit every source's sites for numbers
 
 server.py                      # JSON API: HTTP routing, scrape jobs, Claude, SMTP
 db.py                          #   MySQL connection + schema (and its migrations)
 records.py                     #   raw scraped dict -> one common record shape
 dbsync.py                      #   the write path: store + merge into contacts
 dbquery.py                     #   the read side: list/detail/export/facets, as SQL
+dbphones.py                    #   phones: backfill from records, revalidate
 dbdump.py                      #   export the database to .sql, and restore one
 dbslack.py                     #   Slack workspace exports
 scripts/
@@ -83,6 +86,7 @@ size of the archive.
 | table            | holds                                              | rebuildable?      |
 | ---------------- | -------------------------------------------------- | ----------------- |
 | `records`        | one scraped occurrence, **plus its original JSON** | **no** |
+| `contact_phones` | phone / WhatsApp numbers per contact                | yes, from `records` |
 | `contacts`       | merged people — what the list shows                 | yes, from `records` |
 | `contact_emails` | every address, for the sent-log join                | yes, from `records` |
 | `skipped`        | logins ruled out, so a rescrape skips them          | **no** |
@@ -130,12 +134,78 @@ GET  /api/db/export[?download=1&file=path]   # dump the database to .sql
 POST /api/db/import                          # restore: raw .sql body, or {"path": "..."}
 POST /api/db/import-files[?force=1]          # import pre-database data files, if any
 
+GET  /api/emails?...&contactable=phone|whatsapp   # only contacts with a number
 GET  /api/slack/workspaces                   # Slack workspaces + user counts
 GET  /api/slack/users?ws=<slug>              # one workspace's users
 ```
 
 `source` defaults to `all`. Each `/api/emails` response also returns the
 `sources` list (with per-source counts) used to render the selector.
+
+## Phone / WhatsApp numbers
+
+Alongside the email address, contacts carry any phone numbers found for them.
+**A contact needs a way to reach them, not an email specifically.** Every
+scraper keeps a user with an email **or** a phone / WhatsApp number — someone
+who published only a number is as contactable as someone who published only an
+address. Contacts are also merged on a shared *number*, not just a shared
+address, so the same person posting under two emails but one phone collapses to
+one row.
+
+A number is only kept when something vouches for it — a `wa.me` /
+`api.whatsapp.com` link, a `tel:` link, a "WhatsApp:" / "Tel." label, or a
+leading `+` and a real country calling code. A bare local number with no
+country context is dropped, as are dates, version strings and order ids. That
+trades recall for precision deliberately: a directory of numbers nobody can
+call is worse than a smaller one that is right.
+
+Numbers are stored in E.164 (`+447700900123`), so the same person written three
+different ways de-duplicates to one contact. `whatsapp` records that a number
+was published *as* a WhatsApp contact, not merely that it might work there, and
+those sort first — it is a channel the person chose to be reachable on. The
+**Reach** filter narrows the list to contacts with a number, or to those on
+WhatsApp; both appear in the CSV export.
+
+Finding them happens in two places, which cost very different amounts:
+
+```bash
+npm run db:phones      # re-extract from what is already stored -- seconds, free
+npm run scrape:phones  # revisit contacts' own sites -- hours, thousands of requests
+```
+
+**A normal scrape already collects numbers.** The GitHub scraper fetches each
+user's site and README for their email anyway, and now scans those same pages
+for a phone in the same pass — same pages, same order, same early exit, so it
+makes exactly as many requests as before. The other scrapers keep a post or
+profile that offers a number even when it offers no address. `scrape:phones` is
+therefore only for the **back catalogue**: contacts scraped before this existed,
+whose pages were fetched and discarded. Once it has run, it never needs to again.
+
+The first works because `records.raw` keeps each scraper's original JSON: new
+kinds of extraction can be run over the whole archive without re-scraping
+anything. The second exists because a profile almost never carries a number —
+of 10,770 stored GitHub profiles the bio yielded two — while a developer's own
+site often does, in a footer or a contact page. Every source stores somewhere
+to go back to, so the pass covers all of them:
+
+| source      | where it goes back to                                    |
+| ----------- | -------------------------------------------------------- |
+| `github`    | the profile's `blog` field, plus the `<login>/<login>` README |
+| `aboutme`   | the profile's own links, and any URL in its summary       |
+| `discourse` | sites the person linked from their posts                  |
+| `devto`     | the post's apply / messaging links                        |
+
+Each site is crawled homepage-first, then `/contact` and `/about`, stopping as
+soon as a WhatsApp link turns up. Profile silos (LinkedIn, Twitter, …) and
+asset URLs are skipped — the request costs as much as a useful one. The pass is
+resumable (visited records are remembered, per source), safe to stop (each hit
+is stored as it is found), and throttled like the scrapers.
+
+```bash
+npm run scrape:phones -- --source aboutme   # one source
+npm run scrape:phones -- --limit 200        # per source, for a taste of it
+npm run scrape:phones -- --all              # revisit contacts that already have one
+```
 
 ## Re-scraping from the UI
 
@@ -275,6 +345,11 @@ plain `mysql <`, or onto another MySQL server. `backups/` is git-ignored.
 | --------------------- | -------------------------------------------------------- |
 | `npm run db:start`    | Start MySQL on its own (stays attached)                   |
 | `npm run db:stop`     | Shut it down cleanly                                      |
+| `npm run scrape:phones` | Revisit every contact's own site looking for phone numbers |
+| `npm run db:phones`   | Re-extract phones from stored records (no network)         |
+| `npm run db:phones:status` | How many contacts have a number                      |
+| `npm run db:phones:revalidate` | Drop stored numbers the current rules reject      |
+| `npm run db:rebuild-contacts` | Recompute the merged contacts from `records`      |
 | `npm run db:sync`     | Import pre-database data files, if any are still on disk   |
 | `npm run db:rebuild`  | Re-import them from the start                              |
 | `npm run dev:server`  | Data server only (expects MySQL to be up)                  |

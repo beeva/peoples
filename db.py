@@ -223,10 +223,13 @@ def insert_chunked(sql: str, rows, chunk_bytes: int = MAX_CHUNK_BYTES) -> int:
 # derived from the scraper files, so a version bump just drops and rebuilds
 # them -- nothing is lost. Server-owned tables (enrichment, sent_log,
 # app_state) are never dropped and would need a real ALTER.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
-# Tables that dbsync can regenerate from the scraper files at any time.
-INGESTED_TABLES = ("contact_emails", "contacts", "records")
+# Tables that are a materialised view of `records` and can be rebuilt from it
+# at any time. Everything NOT in this list is its own source of truth and must
+# never be dropped -- `records` above all, since the scrapers write into it
+# directly and no file stands behind it any more.
+DERIVED_TABLES = ("contact_emails", "contact_phones", "contacts")
 
 SCHEMA = [
     # Every scraped occurrence, normalised to the shape server.py works in.
@@ -242,6 +245,10 @@ SCHEMA = [
       -- Kept as JSON on the row rather than in a join table: the only reader
       -- is the merge, which wants them as an ordered list per record anyway.
       emails               TEXT         NULL,
+      -- The record's phone / WhatsApp numbers, E.164, strongest evidence
+      -- first: [{"number","whatsapp","via"}]. Same reasoning as `emails` --
+      -- an ordered list per record, whose only reader is the merge.
+      phones               TEXT         NULL,
       -- The scraper's original record, verbatim. The normalised columns are a
       -- lossy projection of it -- they drop `email_sources`, `followers`,
       -- `region`, `hireable` and anything a scraper starts collecting later --
@@ -289,6 +296,13 @@ SCHEMA = [
       provider         VARCHAR(16)  NOT NULL DEFAULT '',
       emails           TEXT         NULL,
       email_count      INT          NOT NULL DEFAULT 0,
+      -- Phone numbers, unioned across the records that merged into this
+      -- person. `primary_phone` is the one to message (WhatsApp first);
+      -- `has_whatsapp` is denormalised so the filter can use it directly.
+      phones           TEXT         NULL,
+      primary_phone    VARCHAR(24)  NOT NULL DEFAULT '',
+      phone_count      INT          NOT NULL DEFAULT 0,
+      has_whatsapp     TINYINT(1)   NOT NULL DEFAULT 0,
       name             VARCHAR(255) NOT NULL DEFAULT '',
       username         VARCHAR(190) NOT NULL DEFAULT '',
       title            VARCHAR(512) NOT NULL DEFAULT '',
@@ -344,7 +358,11 @@ SCHEMA = [
       -- Country *is* selective (one of a couple of hundred), and this is also
       -- how a single enrichment result finds the contact it belongs to.
       KEY idx_contacts_source_country (source, country),
-      KEY idx_contacts_primary_email (primary_email)
+      KEY idx_contacts_primary_email (primary_email),
+      -- Two-value columns, so these earn their place only in combination
+      -- with the source the list is already filtering on.
+      KEY idx_contacts_source_phone (source, phone_count),
+      KEY idx_contacts_source_whatsapp (source, has_whatsapp)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     # Every address belonging to a contact -- "messaged" is true when ANY of
@@ -356,6 +374,22 @@ SCHEMA = [
       pos        INT          NOT NULL DEFAULT 0,
       PRIMARY KEY (contact_id, email),
       KEY idx_contact_emails_email (email)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    # Every number belonging to a contact, so a number can be traced back to
+    # its person the same way an address can. `whatsapp` records that the
+    # number was published *as* a WhatsApp contact, not merely that it might
+    # work there; `via` remembers what vouched for it (a wa.me link is a much
+    # warmer lead than a number found loose in a bio).
+    """
+    CREATE TABLE IF NOT EXISTS contact_phones (
+      contact_id VARCHAR(190) NOT NULL,
+      phone      VARCHAR(24)  NOT NULL,
+      whatsapp   TINYINT(1)   NOT NULL DEFAULT 0,
+      via        VARCHAR(16)  NOT NULL DEFAULT '',
+      pos        INT          NOT NULL DEFAULT 0,
+      PRIMARY KEY (contact_id, phone),
+      KEY idx_contact_phones_phone (phone)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     # People a scrape looked at and ruled out for a reason that does not depend
@@ -510,12 +544,63 @@ def bootstrap(verbose: bool = True) -> None:
             print(f"[db] {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME} ready")
 
 
-def _migrate_ingested(verbose: bool = True) -> None:
-    """Rebuild the ingested tables when their shape has changed.
+def _columns_of(table: str) -> set:
+    return {r["COLUMN_NAME"] for r in query(
+        "SELECT COLUMN_NAME FROM information_schema.columns "
+        "WHERE table_schema = %s AND table_name = %s", (DB_NAME, table))}
 
-    They are a cache of the scraper files, so dropping them costs one re-sync
-    and nothing else -- far simpler, and far less error-prone, than writing an
-    ALTER for every column that moves. The server-owned tables are untouched.
+
+def _ensure_columns(verbose: bool = True) -> None:
+    """Add columns that a newer schema introduced, without touching the data.
+
+    ``records`` cannot be regenerated from anywhere -- the scrapers write to it
+    directly and there are no files behind it -- so its shape has to evolve by
+    ALTER. The same goes for the other tables that are their own source of
+    truth. This reads the real column list rather than tracking what each
+    version added, so it converges from any starting point.
+    """
+    wanted = {
+        "records": [
+            ("phones", "ALTER TABLE records ADD COLUMN phones TEXT NULL "
+                       "AFTER emails"),
+            ("raw", "ALTER TABLE records ADD COLUMN raw MEDIUMTEXT NULL"),
+        ],
+        "contacts": [
+            ("phones", "ALTER TABLE contacts ADD COLUMN phones TEXT NULL"),
+            ("primary_phone", "ALTER TABLE contacts ADD COLUMN primary_phone "
+                              "VARCHAR(24) NOT NULL DEFAULT ''"),
+            ("phone_count", "ALTER TABLE contacts ADD COLUMN phone_count "
+                            "INT NOT NULL DEFAULT 0"),
+            ("has_whatsapp", "ALTER TABLE contacts ADD COLUMN has_whatsapp "
+                             "TINYINT(1) NOT NULL DEFAULT 0"),
+            ("provider", "ALTER TABLE contacts ADD COLUMN provider "
+                         "VARCHAR(16) NOT NULL DEFAULT ''"),
+        ],
+    }
+    for table, columns in wanted.items():
+        have = _columns_of(table)
+        if not have:
+            continue  # table does not exist yet; CREATE TABLE will make it
+        for name, ddl in columns:
+            if name in have:
+                continue
+            try:
+                execute(ddl)
+                if verbose:
+                    print(f"[db] added {table}.{name}")
+            except pymysql.Error as e:
+                print(f"[warn] could not add {table}.{name}: {e}",
+                      file=sys.stderr)
+
+
+def _migrate_ingested(verbose: bool = True) -> None:
+    """Bring an existing database up to the current schema.
+
+    Only the *derived* tables are ever dropped -- ``contacts`` and its child
+    tables, which are a materialised merge and can be rebuilt from ``records``
+    in seconds. ``records`` itself is never dropped: the scrapers write into it
+    directly, so it is the archive, and there is no file to re-read it from.
+    Its shape changes by ALTER instead.
     """
     import json
     row = query_one("SELECT v FROM app_state WHERE k = 'schema_version'")
@@ -527,18 +612,37 @@ def _migrate_ingested(verbose: bool = True) -> None:
         return
     if current:
         if verbose:
-            print(f"[db] schema {current} -> {SCHEMA_VERSION}: rebuilding "
-                  f"ingested tables")
+            print(f"[db] schema {current} -> {SCHEMA_VERSION}: migrating")
+        _ensure_columns(verbose)
         with connection().cursor() as cur:
             cur.execute("SET FOREIGN_KEY_CHECKS = 0")
-            for table in INGESTED_TABLES:
+            for table in DERIVED_TABLES:
                 cur.execute(f"DROP TABLE IF EXISTS `{table}`")
             cur.execute("DROP TABLE IF EXISTS `record_emails`")  # retired in v3
             cur.execute("SET FOREIGN_KEY_CHECKS = 1")
-        execute_script(SCHEMA)
-        # The files have not changed, so nothing would otherwise re-sync them.
-        execute("DELETE FROM sync_meta")
+    execute_script(SCHEMA)
+    _ensure_columns(verbose=False)
+    if current:
+        # `contacts` was just dropped and recreated empty. Rebuilding it is the
+        # caller's job (dbsync.rebuild_contacts), because it needs the merge --
+        # but flag it so nothing serves an empty list in the meantime.
+        state_put("contacts_need_rebuild", True)
     state_put("schema_version", SCHEMA_VERSION)
+
+
+def contacts_need_rebuild() -> bool:
+    row = query_one("SELECT v FROM app_state WHERE k = 'contacts_need_rebuild'")
+    if not row:
+        return False
+    import json
+    try:
+        return bool(json.loads(row["v"]))
+    except ValueError:
+        return False
+
+
+def clear_contacts_rebuild_flag() -> None:
+    execute("DELETE FROM app_state WHERE k = 'contacts_need_rebuild'")
 
 
 class bulk_load:
@@ -571,7 +675,8 @@ def server_version() -> str:
 def table_counts() -> dict:
     """Row counts per table, for the Database page and `npm run db:status`."""
     out = {}
-    for name in ("records", "contacts", "contact_emails", "skipped",
+    for name in ("records", "contacts", "contact_emails", "contact_phones",
+                 "skipped",
                  "slack_users", "enrichment", "sent_log", "app_state",
                  "sync_meta"):
         try:
