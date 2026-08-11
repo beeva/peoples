@@ -1,0 +1,93 @@
+# Run a scraper on GitHub Actions.
+#
+# This is where scrapes go when the API is deployed to a managed host: a run
+# takes hours, and a free container may be restarted or idled long before it
+# finishes. A runner has six hours, keeps the logs, and costs nothing.
+#
+# Started either on the schedule below, by hand from the Actions tab, or by the
+# Rescrape button in the UI -- server.py dispatches this workflow when GH_REPO
+# and GH_DISPATCH_TOKEN are set, passing exactly the arguments a local scrape
+# would have used, so "filter, then Rescrape" keeps working.
+name: scrape
+
+# One workflow serves every source, so a run has to say which source it is for
+# -- server.py reads this back to attribute a run to the source that asked for
+# it. Without it, scraping two sources at once would have each of them polling
+# the other's status. Keep the format in step with `_gh_latest_run`.
+run-name: scrape ${{ inputs.source || 'phones' }}
+
+on:
+  schedule:
+    # 02:00 UTC daily. The phone pass is resumable, so each run continues where
+    # the last one stopped rather than starting over.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Which scraper to run"
+        type: choice
+        required: true
+        default: phones
+        options: [phones, github, aboutme, devto, discourse]
+      args:
+        description: "Arguments for the scraper (e.g. --limit 5000)"
+        type: string
+        required: false
+        default: "--limit 5000"
+
+concurrency:
+  # Two runs of the same source would fetch the same pages twice and race on
+  # the same rows. Queued rather than cancelled: a run part-way through has
+  # already stored what it found, and letting it finish is worth more.
+  group: scrape-${{ inputs.source || 'phones' }}
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    # Under the six-hour ceiling. phone_pass.py turns SIGTERM into the
+    # interrupt it already handles, so hitting this writes the resume set and
+    # folds in what was found -- a timed-out run is a partial one, not a lost one.
+    timeout-minutes: 350
+
+    env:
+      MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+      MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+      MYSQL_USER: ${{ secrets.MYSQL_USER }}
+      MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+      MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+      MYSQL_SSL: "1"
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # A token is not strictly required, but without one GitHub search is
+      # 10 requests/minute, which makes a real run pointless. Named
+      # SCRAPE_GITHUB_TOKEN because GITHUB_TOKEN is reserved by Actions.
+      GITHUB_TOKEN: ${{ secrets.SCRAPE_GITHUB_TOKEN }}
+      # Enrichment belongs to the always-on API, which has the whole archive in
+      # front of it. Doing it here as well would pay Claude twice for one answer.
+      ENRICH: "0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Scrape
+        # Inputs go through the environment rather than being interpolated into
+        # the shell -- an argument string is data, and ${{ }} in a run: block is
+        # code. run_scraper.py splits it with shlex, so quoting survives.
+        env:
+          SOURCE: ${{ inputs.source || 'phones' }}
+          ARGS: ${{ inputs.args || '--limit 5000' }}
+        run: python scripts/run_scraper.py "$SOURCE" "$ARGS"
+
+      - name: Row counts after the run
+        # `always()`: the counts are most interesting precisely when the step
+        # above timed out or failed, because everything found before that point
+        # is already in the database.
+        if: always()
+        run: python dbdump.py status

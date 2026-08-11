@@ -1,0 +1,32 @@
+# The API image needs Python and nothing else. Everything below is either the
+# frontend's business, local state, or data that must never be baked into an
+# image that gets pushed to a registry.
+
+# Secrets, above all.
+.env
+.env.local
+web/.env.local
+
+# The local MySQL and its dumps -- hundreds of megabytes, and the container
+# talks to a managed database anyway.
+db/data/
+backups/
+.mysqld.pid
+
+# The frontend: built and served by Vercel, not by this image.
+web/
+node_modules/
+package-lock.json
+
+# Build and runtime droppings.
+__pycache__/
+*.pyc
+*.log
+.git/
+.gitignore
+TODO/
+scrapers/**/.cursor
+
+# Documentation adds nothing to a running container.
+DEPLOY.md
+README.md

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { API_BASE_URL } from "@/lib/emails";
+import { API_BASE_URL, API_HEADERS } from "@/lib/emails";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +7,7 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const res = await fetch(`${API_BASE_URL}/api/db/status`, {
+      headers: API_HEADERS,
       cache: "no-store",
     });
     const data = await res.json();
@@ -26,6 +27,7 @@ export async function POST(req: NextRequest) {
   try {
     const res = await fetch(`${API_BASE_URL}/api/db/import-files?${qs}`, {
       method: "POST",
+      headers: API_HEADERS,
       cache: "no-store",
     });
     const data = await res.json();

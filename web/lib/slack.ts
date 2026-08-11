@@ -1,7 +1,7 @@
 import "server-only";
 
 import { cache } from "react";
-import { API_BASE_URL } from "@/lib/emails";
+import { API_BASE_URL, API_HEADERS } from "@/lib/emails";
 
 /** Slack workspace exports come from the data server, like everything else.
  *
@@ -168,7 +168,7 @@ const readWorkspace = cache(async (slug: string): Promise<Json[]> => {
   try {
     const res = await fetch(
       `${API_BASE_URL}/api/slack/users?ws=${encodeURIComponent(slug)}`,
-      { cache: "no-store" },
+      { cache: "no-store", headers: API_HEADERS },
     );
     if (!res.ok) return [];
     const data = (await res.json()) as { users?: Json[] };
@@ -183,6 +183,7 @@ export const listWorkspaces = cache(async (): Promise<WorkspaceInfo[]> => {
   try {
     const res = await fetch(`${API_BASE_URL}/api/slack/workspaces`, {
       cache: "no-store",
+      headers: API_HEADERS,
     });
     if (!res.ok) return [];
     const data = (await res.json()) as { workspaces?: WorkspaceInfo[] };

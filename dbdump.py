@@ -20,13 +20,19 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 import db
 
 BASE_DIR = Path(__file__).resolve().parent
 # Dumps land here by default. Git-ignored: they are large and reproducible.
-BACKUP_DIR = Path(os.environ.get("MYSQL_BACKUP_DIR", BASE_DIR / "backups"))
+# `.strip() or` rather than a get() default: a `.env` line reading
+# `MYSQL_BACKUP_DIR=` sets the variable to the empty string, which get() treats
+# as present -- and Path("") is the *current directory*, so dumps would land in
+# the repository root instead of here.
+BACKUP_DIR = Path(os.environ.get("MYSQL_BACKUP_DIR", "").strip()
+                  or (BASE_DIR / "backups"))
 
 # Where XAMPP keeps mysqldump/mysql. Same search order as scripts/mysql-server.js.
 CANDIDATE_BASEDIRS = [
@@ -76,9 +82,47 @@ def _run(argv: list[str], *, stdout=None, stdin=None) -> subprocess.CompletedPro
     return proc
 
 
-def _auth_flags() -> list[str]:
+@lru_cache(maxsize=None)
+def _has_option(tool_path: str, option: str) -> bool:
+    """Whether a client binary accepts an option, asked of the binary itself.
+
+    The two clients that answer to `mysqldump` spell TLS differently -- Oracle's
+    takes --ssl-mode, MariaDB's (which is what Debian's `default-mysql-client`
+    installs) takes --ssl and rejects --ssl-mode outright. Reading --help is
+    cheaper than guessing from a version string, and it is only ever done once
+    per process.
+    """
+    try:
+        proc = subprocess.run([tool_path, "--help"], stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return option.encode() in (proc.stdout or b"")
+
+
+def _ssl_flags(tool_path: str) -> list[str]:
+    """TLS flags for a client binary, matching db.py's connection settings.
+
+    A managed server refuses a plaintext connection, and neither client turns
+    TLS on by itself in every build -- so when the rest of the project is
+    configured for TLS, say so explicitly. Otherwise export and restore would
+    fail against the very database the server is reading happily.
+    """
+    ca = os.environ.get("MYSQL_SSL_CA", "").strip()
+    if not ca and os.environ.get("MYSQL_SSL", "").strip() != "1":
+        return []
+    if _has_option(tool_path, "--ssl-mode"):
+        return (["--ssl-mode=VERIFY_CA", f"--ssl-ca={ca}"] if ca
+                else ["--ssl-mode=REQUIRED"])
+    # MariaDB's client: --ssl requires the connection, and naming a CA is what
+    # turns on verification against it.
+    return (["--ssl", f"--ssl-ca={ca}"] if ca else ["--ssl"])
+
+
+def _auth_flags(tool_path: str) -> list[str]:
     """Connection flags. The password travels in MYSQL_PWD, not argv."""
-    return [f"--host={db.DB_HOST}", f"--port={db.DB_PORT}", f"--user={db.DB_USER}"]
+    return [f"--host={db.DB_HOST}", f"--port={db.DB_PORT}", f"--user={db.DB_USER}",
+            *_ssl_flags(tool_path)]
 
 
 def default_filename() -> str:
@@ -93,7 +137,8 @@ def export_sql(target: str | None = None) -> dict:
         path = path / default_filename()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    argv = [_tool("mysqldump"), *_auth_flags(),
+    dump_tool = _tool("mysqldump")
+    argv = [dump_tool, *_auth_flags(dump_tool),
             "--databases", db.DB_NAME,
             # Recreate the database on restore, so a dump is a complete
             # description of the archive rather than a diff against one.
@@ -155,9 +200,13 @@ def import_sql(path: str = "", sql_bytes: bytes | None = None) -> dict:
     db.ensure_database()
     # A dump made with --databases carries its own CREATE DATABASE/USE, but one
     # made from a single table may not, so connect to the database by default.
-    argv = [_tool("mysql"), *_auth_flags(),
+    sql_tool = _tool("mysql")
+    argv = [sql_tool, *_auth_flags(sql_tool),
             "--default-character-set=utf8mb4",
-            f"--max-allowed-packet={os.environ.get('MYSQL_MAX_PACKET', '64M')}",
+            # Same blank-is-not-absent trap: an empty MYSQL_MAX_PACKET would
+            # render as `--max-allowed-packet=`, which the client rejects.
+            f"--max-allowed-packet="
+            f"{os.environ.get('MYSQL_MAX_PACKET', '').strip() or '64M'}",
             db.DB_NAME]
     try:
         with source.open("rb") as fh:
@@ -264,9 +313,16 @@ def main(argv: list[str]) -> int:
         for name, n in st["tables"].items():
             print(f"       {name:<16} {n}")
         for s in st["sources"]:
-            flag = "STALE" if s["stale"] else "in sync"
-            print(f"       {s['source']:<16} {s['contacts']} contacts "
-                  f"from {s['records']} records ({flag})")
+            line = (f"       {s['source']:<16} {s['contacts']} contacts "
+                    f"from {s['records']} records")
+            if s.get("runs"):
+                line += f", {s['runs']} run(s)"
+            # A pre-database data file still sitting on disk, never read in.
+            # Worth saying out loud, because its contents are in none of the
+            # counts above.
+            if s.get("legacy_pending"):
+                line += "  [legacy file pending import]"
+            print(line)
         if st["backups"]:
             print(f"[db] {len(st['backups'])} dump(s) in {st['backup_dir']}")
         return 0

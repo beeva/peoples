@@ -836,7 +836,7 @@ def migrate_legacy_json(verbose: bool = True) -> dict:
         if rows:
             moved["sent_log"] = db.insert_chunked(
                 "INSERT IGNORE INTO sent_log (email, send_count, last_sent, "
-                "last_subject, manual) VALUES (%s, %s, %s, %s, %s)", rows)
+                "last_subject, `manual`) VALUES (%s, %s, %s, %s, %s)", rows)
 
     if int(db.scalar("SELECT COUNT(*) AS n FROM skipped WHERE source = 'github'",
                      default=0)) == 0:

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { API_BASE_URL } from "@/lib/emails";
+import { API_BASE_URL, API_HEADERS } from "@/lib/emails";
 
 export const dynamic = "force-dynamic";
 
@@ -9,7 +9,7 @@ export async function POST(req: NextRequest) {
   try {
     const res = await fetch(`${API_BASE_URL}/api/message/mark`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { ...API_HEADERS, "content-type": "application/json" },
       body,
       cache: "no-store",
     });

@@ -143,6 +143,17 @@ export const API_BASE_URL = (
   process.env.API_BASE_URL || "http://127.0.0.1:8000"
 ).replace(/\/+$/, "");
 
+/** Shared secret for the data server; empty in local development.
+ *
+ *  Deliberately not NEXT_PUBLIC_: every call to the data server is made from
+ *  the Next.js server (route handlers and server components), never from the
+ *  browser, so the token has no reason to leave this process -- and a
+ *  NEXT_PUBLIC_ name would inline it into the client bundle for everyone.
+ */
+export const API_HEADERS: Record<string, string> = process.env.API_TOKEN
+  ? { "X-Api-Token": process.env.API_TOKEN }
+  : {};
+
 const EMPTY_STATS: Stats = {
   totalPosts: 0,
   totalEmails: 0,
@@ -373,7 +384,7 @@ export async function fetchEmails(
   const url = `${API_BASE_URL}/api/emails?${params.toString()}`;
 
   try {
-    const res = await fetch(url, { cache: "no-store" });
+    const res = await fetch(url, { cache: "no-store", headers: API_HEADERS });
     if (!res.ok) {
       throw new Error(`Data server responded ${res.status}`);
     }
@@ -476,7 +487,7 @@ interface RawDetail extends RawItem {
 export async function fetchEmailDetail(id: string): Promise<EmailDetail | null> {
   const url = `${API_BASE_URL}/api/email?id=${encodeURIComponent(id)}`;
   try {
-    const res = await fetch(url, { cache: "no-store" });
+    const res = await fetch(url, { cache: "no-store", headers: API_HEADERS });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`Data server responded ${res.status}`);
     const it: RawDetail = await res.json();

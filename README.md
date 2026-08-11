@@ -39,8 +39,14 @@ dbslack.py                     #   Slack workspace exports
 scripts/
   mysql-server.js              # starts/stops this project's MySQL
   kill-port.js
+  run_scraper.py               # runs one scraper by name (used by CI)
 web/                           # Next.js (App Router) frontend
+  middleware.ts                #   HTTP Basic auth, when UI_USER/UI_PASS are set
 package.json                   # orchestrates MySQL + server.py + web/ together
+
+Dockerfile                     # the API as a container, for a managed host
+DEPLOY.md                      # deploying the whole thing on free tiers
+.github/workflows/             # scrape / backup / seed, on GitHub Actions
 ```
 
 The scrapers are independent but share `scrapers/common/`, so each one is just
@@ -375,3 +381,26 @@ Copy `.env.example` to `.env`. The database settings there are
 
 The frontend reads `API_BASE_URL` (default `http://127.0.0.1:8000`). To point at
 a different backend, copy `web/.env.example` to `web/.env.local` and edit it.
+
+## Deployment
+
+**[DEPLOY.md](DEPLOY.md)** is the full guide: a free, fully managed stack —
+Vercel for the UI, a free container for the API, managed MySQL, and GitHub
+Actions for the scrapers. **[CREDENTIALS.md](CREDENTIALS.md)** covers the other
+half — where every key and token comes from, and where each one has to be
+pasted.
+
+The code for it is here and every part of it is **off by default**, so nothing
+below changes how the project runs locally:
+
+| set this | and | |
+| --- | --- | --- |
+| `HOST` / `PORT` | the API binds a public interface instead of loopback | `server.py` |
+| `MYSQL_SSL=1` | it connects to a managed database over TLS | `db.py`, `dbdump.py` |
+| `API_TOKEN` | every request must carry `X-Api-Token` | `server.py` |
+| `UI_USER` / `UI_PASS` | HTTP Basic auth over the whole UI | `web/middleware.ts` |
+| `GH_REPO` / `GH_DISPATCH_TOKEN` | Rescrape dispatches a GitHub Actions run instead of forking a subprocess | `server.py` |
+
+The last one is there because a scrape takes hours and a free container does
+not. Dispatched runs are built from the same arguments a local scrape would
+use, so filtering the list and pressing Rescrape works the same either way.

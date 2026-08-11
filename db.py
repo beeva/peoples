@@ -66,11 +66,29 @@ _BOOTSTRAP_LOCK = threading.Lock()
 _BOOTSTRAPPED = False
 
 
+def _ssl_options() -> dict | None:
+    """TLS settings for the connection, or None for a plaintext one.
+
+    A local server on 127.0.0.1 needs none. Managed MySQL (Aiven, TiDB Cloud)
+    requires TLS and will refuse the handshake without it, so deployment turns
+    this on by environment rather than by a code change. MYSQL_SSL_CA names the
+    provider's CA bundle; MYSQL_SSL=1 alone trusts the system store, which is
+    enough for a provider whose certificate chains to a public root.
+    """
+    ca = os.environ.get("MYSQL_SSL_CA", "").strip()
+    if ca:
+        return {"ca": ca}
+    if os.environ.get("MYSQL_SSL", "").strip() == "1":
+        return {}
+    return None
+
+
 def _connect(database: str | None = DB_NAME):
     return pymysql.connect(
         host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD,
         database=database, charset="utf8mb4", autocommit=True,
         cursorclass=DictCursor, connect_timeout=10,
+        ssl=_ssl_options(),
         # Large ingests are sent as one multi-row INSERT per chunk; the local
         # socket is fast but the read timeout has to cover a slow disk flush.
         read_timeout=120, write_timeout=120,
@@ -440,7 +458,10 @@ SCHEMA = [
       send_count   INT          NOT NULL DEFAULT 0,
       last_sent    VARCHAR(40)  NOT NULL DEFAULT '',
       last_subject VARCHAR(512) NOT NULL DEFAULT '',
-      manual       TINYINT(1)   NOT NULL DEFAULT 0,
+      -- Backticked: `manual` is a reserved word in MySQL 8.4 (though not
+      -- in MariaDB, which is what XAMPP ships), so an unquoted column of
+      -- that name parses locally and is a syntax error on a managed host.
+      `manual`     TINYINT(1)   NOT NULL DEFAULT 0,
       PRIMARY KEY (email)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
@@ -480,10 +501,17 @@ def ensure_database() -> None:
     admin = _connect(database=None)
     try:
         with admin.cursor() as cur:
-            cur.execute(
-                f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` "
-                "DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
-            )
+            try:
+                cur.execute(
+                    f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` "
+                    "DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                )
+            except pymysql.Error:
+                # A managed host hands you one database and withholds the
+                # privilege to make another. Not being allowed to create one
+                # that already exists is not a failure -- if it genuinely is
+                # missing, the connection below says so far more clearly.
+                pass
             # XAMPP's my.ini caps packets at 1MB, which is too small for bulk
             # ingest and for restoring a dump. Raising it here (rather than
             # editing the user's XAMPP config) lasts for the life of this
@@ -508,7 +536,13 @@ def _check_datadir() -> None:
     still succeed while reading an entirely different database, and the archive
     would simply look empty. Better to say so than to let that pass as data
     loss.
+
+    Only meaningful for the server this project starts itself. A managed host
+    serves a data directory that has nothing to do with ours and could not
+    match, so the check has no answer to give and stays quiet.
     """
+    if DB_HOST not in ("127.0.0.1", "localhost", "::1"):
+        return
     try:
         actual = scalar("SELECT @@datadir AS d", default="") or ""
     except pymysql.Error:
@@ -847,7 +881,7 @@ def refresh_sent_for_contacts(contact_ids) -> None:
         execute(
             f"UPDATE contacts c JOIN contact_emails ce ON ce.contact_id = c.id "
             f"JOIN sent_log s ON s.email = ce.email AND s.last_sent = c.messaged_at "
-            f"SET c.messaged_to = s.email, c.messaged_manual = s.manual "
+            f"SET c.messaged_to = s.email, c.messaged_manual = s.`manual` "
             f"WHERE c.id IN ({placeholders}) AND c.messaged_count > 0",
             batch,
         )
@@ -881,5 +915,5 @@ def refresh_all_sent(source: str = "") -> None:
     execute(
         "UPDATE contacts c JOIN contact_emails ce ON ce.contact_id = c.id "
         "JOIN sent_log s ON s.email = ce.email AND s.last_sent = c.messaged_at "
-        "SET c.messaged_to = s.email, c.messaged_manual = s.manual "
+        "SET c.messaged_to = s.email, c.messaged_manual = s.`manual` "
         "WHERE c.messaged_count > 0" + where, args)

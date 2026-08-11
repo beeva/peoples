@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { API_BASE_URL } from "@/lib/emails";
+import { API_BASE_URL, API_HEADERS } from "@/lib/emails";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +9,7 @@ export async function POST(req: NextRequest) {
   try {
     const res = await fetch(`${API_BASE_URL}/api/scrape/stop?${qs}`, {
       method: "POST",
+      headers: API_HEADERS,
       cache: "no-store",
     });
     const data = await res.json();

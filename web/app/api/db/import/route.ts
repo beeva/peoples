@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { API_BASE_URL } from "@/lib/emails";
+import { API_BASE_URL, API_HEADERS } from "@/lib/emails";
 
 export const dynamic = "force-dynamic";
 // A restore replaces the whole archive; it is allowed to take a while.
@@ -18,7 +18,10 @@ export async function POST(req: NextRequest) {
   try {
     const res = await fetch(`${API_BASE_URL}/api/db/import`, {
       method: "POST",
-      headers: { "Content-Type": isJson ? "application/json" : "application/sql" },
+      headers: {
+        ...API_HEADERS,
+        "Content-Type": isJson ? "application/json" : "application/sql",
+      },
       body: isJson ? await req.text() : await req.arrayBuffer(),
       cache: "no-store",
     });

@@ -25,8 +25,10 @@ Configuration comes from a `.env` file next to this script -- see
     python server.py            # http://127.0.0.1:8000
     python server.py 9000       # custom port
 """
+import hmac
 import json
 import os
+import shlex
 import smtplib
 import subprocess
 import sys
@@ -86,6 +88,33 @@ from records import now_iso as _now_iso  # noqa: E402
 
 SOURCES = rec_mod.SOURCES
 SOURCE_BY_KEY = rec_mod.SOURCE_BY_KEY
+
+# ---- access control -------------------------------------------------------
+# Blank is the local default and means "no check", because the server binds
+# 127.0.0.1 and nothing outside this machine can reach it. Set it wherever the
+# port is reachable from anywhere else: this API starts scrapes, sends mail
+# through the configured SMTP account, dumps the whole database, and executes a
+# raw .sql body -- an open port is an open door.
+API_TOKEN = os.environ.get("API_TOKEN", "")
+# The interface to bind. Loopback locally; managed hosts route to the container
+# and need 0.0.0.0, so this is set by environment rather than by editing code.
+# `or` rather than a get() default: a `.env` carrying `HOST=` sets the variable
+# to the empty string, which is *present* as far as get() is concerned -- and an
+# empty bind address means INADDR_ANY, i.e. every interface. Blank has to mean
+# loopback here, or documenting the setting would quietly publish the API.
+BIND_HOST = os.environ.get("HOST", "").strip() or "127.0.0.1"
+
+# ---- scrapes on GitHub Actions --------------------------------------------
+# A scrape runs for hours. That is fine as a subprocess of a server on a
+# machine that stays up, and impossible on a managed host that may be restarted
+# or idled at any moment. With GH_REPO set, /api/scrape dispatches the workflow
+# instead of spawning a process; without it, nothing changes.
+GH_REPO = os.environ.get("GH_REPO", "").strip()
+GH_DISPATCH_TOKEN = os.environ.get("GH_DISPATCH_TOKEN", "").strip()
+# Same blank-is-not-absent trap as BIND_HOST: these two have real defaults, and
+# a `.env` line with nothing after the `=` must not erase them.
+GH_WORKFLOW = os.environ.get("GH_WORKFLOW", "").strip() or "scrape.yml"
+GH_REF = os.environ.get("GH_REF", "").strip() or "main"
 
 # ---- outbound messaging (Claude-generated email) --------------------------
 # Everything sensitive comes from the environment -- nothing is hardcoded.
@@ -368,6 +397,201 @@ def _run_scrape(key: str, params: dict):
     save_state(key)
 
 
+# ---- scrapes on GitHub Actions --------------------------------------------
+# Where the work goes when this server cannot host it. A scrape runs for hours;
+# a managed container may be restarted or idled long before that, and its
+# filesystem does not survive either. Actions has a six-hour ceiling, keeps the
+# logs, and costs nothing -- and because every scraper writes into MySQL as it
+# goes, the results still stream into this UI while the workflow runs.
+GH_API = "https://api.github.com"
+# The status poll runs every 1.5s per open UI. Asking GitHub that often would
+# spend the hourly rate limit on nothing, so a run's state is held briefly and
+# shared by every poller.
+GH_POLL_SECONDS = 5.0
+_GH_CACHE_LOCK = threading.Lock()
+_GH_CACHE: dict = {}          # source key -> (fetched_at, run dict)
+
+
+def remote_scrapes() -> bool:
+    """Whether scrapes are dispatched to Actions rather than forked here."""
+    return bool(GH_REPO and GH_DISPATCH_TOKEN)
+
+
+def _gh(path: str, method: str = "GET", body: dict | None = None) -> tuple:
+    """One GitHub REST call. Returns (status, parsed body or {})."""
+    req = urllib.request.Request(
+        f"{GH_API}{path}",
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={
+            "Authorization": f"Bearer {GH_DISPATCH_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+            "User-Agent": "email-scrapper",
+        },
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read()
+        # A successful dispatch and a successful cancel both answer 204 with no
+        # body at all, so an empty response is a result rather than a failure.
+        return resp.status, (json.loads(raw) if raw else {})
+
+
+def _remote_args(key: str, params: dict) -> str:
+    """The scraper's own arguments, as the workflow will pass them on.
+
+    Built by the same `_scrape_argv` a local run uses, so a scrape started from
+    the UI is targeted by exactly the same filters whether it runs here or on a
+    runner -- "filter, then Rescrape" keeps working. The interpreter and script
+    path are dropped (the workflow derives those from the source), and
+    `--cursor-out` with them: a runner's filesystem does not outlive the job,
+    so there is nowhere for a cursor file to be read back from.
+    """
+    argv = _scrape_argv(key, params)[2:]
+    out: list[str] = []
+    skip = False
+    for arg in argv:
+        if skip:
+            skip = False
+            continue
+        if arg == "--cursor-out":
+            skip = True
+            continue
+        out.append(arg)
+    return " ".join(shlex.quote(a) for a in out)
+
+
+def _gh_recent_runs() -> list:
+    """The workflow's recent runs, fetched at most once per GH_POLL_SECONDS."""
+    now = time.time()
+    with _GH_CACHE_LOCK:
+        cached = _GH_CACHE.get("runs")
+        if cached and now - cached[0] < GH_POLL_SECONDS:
+            return cached[1]
+    try:
+        _, data = _gh(f"/repos/{GH_REPO}/actions/workflows/{GH_WORKFLOW}/runs"
+                      f"?per_page=20")
+        runs = data.get("workflow_runs") or []
+    except (urllib.error.URLError, OSError, ValueError):
+        runs = []
+    with _GH_CACHE_LOCK:
+        _GH_CACHE["runs"] = (now, runs)
+    return runs
+
+
+def _gh_latest_run(key: str) -> dict:
+    """The most recent run of that workflow *for this source*.
+
+    One workflow serves every source, so the newest run is not necessarily the
+    one this source asked for. scrape.yml sets `run-name: scrape <source>` for
+    exactly this reason: without something to attribute a run by, scraping two
+    sources at once would have each of them reading the other's status.
+    """
+    want = f"scrape {key}"
+    for run in _gh_recent_runs():
+        if (run.get("display_title") or run.get("name") or "").strip() == want:
+            return run
+    return {}
+
+
+# GitHub's vocabulary for a run, in ours. Anything not listed is still in
+# flight -- queued, requested, waiting on an approval -- and reads as running.
+_GH_CONCLUSIONS = {
+    "success": "done",
+    "cancelled": "stopped",
+    "skipped": "stopped",
+}
+
+
+def _refresh_remote(key: str) -> None:
+    """Fold the state of the dispatched run into this source's job entry.
+
+    Called from the status route rather than from `_job_view`, which runs while
+    JOBS_LOCK is held in places -- a network call there would block every other
+    scrape operation for as long as GitHub took to answer.
+    """
+    job = JOBS.get(key)
+    if not job or not job.get("remote") or job.get("status") != "running":
+        return
+    run = _gh_latest_run(key)
+    if not run:
+        return
+    # A dispatch answers before the run exists. Until one appears that is newer
+    # than the click, the job stays "running" on the strength of the dispatch
+    # alone -- reporting the *previous* run's result would be a lie.
+    created = run.get("created_at") or ""
+    if created and created < (job.get("dispatched_at") or ""):
+        return
+    status = "running"
+    message = f"running on GitHub Actions · {run.get('html_url') or GH_REPO}"
+    if run.get("status") == "completed":
+        status = _GH_CONCLUSIONS.get(run.get("conclusion") or "", "error")
+        verb = {"done": "finished", "stopped": "cancelled"}.get(status, "failed")
+        message = f"{verb} on GitHub Actions · {run.get('html_url') or GH_REPO}"
+    with JOBS_LOCK:
+        job["status"] = status
+        job["run_id"] = run.get("id")
+        job["run_url"] = run.get("html_url")
+        job["message"] = message
+        if status != "running" and not job.get("finished_at"):
+            job["finished_at"] = _now_iso()
+    if status != "running":
+        # The counts live in the database the runner wrote to, so read the
+        # total from there rather than from anything the workflow reports.
+        # Best-effort: the job status above is the part that matters, and a
+        # status poll must not 500 because the database blinked while a run was
+        # finishing -- the next poll picks it up.
+        try:
+            total = dbquery.source_count(key)
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] could not read {key} count after the run: {e}",
+                  file=sys.stderr)
+            return
+        with STATE_LOCK:
+            prev = STATE.get(key) or {}
+            STATE[key] = {**prev, "last_run": _now_iso(), "last_status": status,
+                          "total": total}
+        save_state(key)
+
+
+def _dispatch_scrape(key: str, params: dict) -> dict:
+    """Ask GitHub Actions to run the scrape, and remember that we did."""
+    dispatched_at = _now_iso()
+    try:
+        _gh(f"/repos/{GH_REPO}/actions/workflows/{GH_WORKFLOW}/dispatches",
+            "POST", {"ref": GH_REF,
+                     "inputs": {"source": key, "args": _remote_args(key, params)}})
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:200]
+        return {"ok": False, "error": f"GitHub refused the dispatch ({e.code}). "
+                                      f"{detail}"}
+    except (urllib.error.URLError, OSError) as e:
+        return {"ok": False, "error": f"could not reach GitHub ({e})"}
+    with JOBS_LOCK:
+        JOBS[key] = {
+            "source": key,
+            "status": "running",
+            "remote": True,
+            "dispatched_at": dispatched_at,
+            "started_at": dispatched_at,
+            "finished_at": None,
+            "added": None,
+            "total": None,
+            "returncode": None,
+            "message": f"dispatched to GitHub Actions ({GH_REPO})",
+            "pid": None,
+            "proc": None,
+            "run_id": None,
+            "run_url": f"https://github.com/{GH_REPO}/actions",
+            "stop_requested": False,
+            "log": deque(maxlen=300),
+        }
+    with _GH_CACHE_LOCK:
+        _GH_CACHE.pop("runs", None)     # don't answer the first poll from before
+    return {"ok": True, "job": _job_view(key)}
+
+
 def start_scrape(key: str, params: dict) -> dict:
     """Start a background scrape for `key` unless one is already running."""
     if key not in SOURCE_BY_KEY:
@@ -376,6 +600,11 @@ def start_scrape(key: str, params: dict) -> dict:
         cur = JOBS.get(key)
         if cur and cur.get("status") == "running":
             return {"ok": False, "error": "already running", "job": _job_view(key)}
+    # Where the work happens is a deployment decision, not a scraper one: the
+    # arguments are identical either way (see _remote_args).
+    if remote_scrapes():
+        return _dispatch_scrape(key, params)
+    with JOBS_LOCK:
         JOBS[key] = {
             "source": key,
             "status": "running",
@@ -405,6 +634,22 @@ def stop_scrape(key: str) -> dict:
             return {"ok": False, "error": "not running"}
         job["stop_requested"] = True
         proc = job.get("proc")
+        remote_id = job.get("run_id") if job.get("remote") else None
+        is_remote = bool(job.get("remote"))
+    if is_remote:
+        if not remote_id:
+            # Dispatched, but GitHub has not created the run yet. Cancelling
+            # something that does not exist is not possible; say so rather than
+            # report a stop that will not happen.
+            return {"ok": False, "error": "the run has not started yet -- "
+                                          "try again in a few seconds"}
+        try:
+            _gh(f"/repos/{GH_REPO}/actions/runs/{remote_id}/cancel", "POST", {})
+        except (urllib.error.URLError, OSError) as e:
+            return {"ok": False, "error": f"could not cancel the run ({e})"}
+        with _GH_CACHE_LOCK:
+            _GH_CACHE.pop("runs", None)
+        return {"ok": True, "job": _job_view(key)}
     _terminate(proc)  # if proc is None (not spawned yet), _run_scrape stops it on start
     return {"ok": True, "job": _job_view(key)}
 
@@ -422,6 +667,10 @@ def _job_view(key: str) -> dict:
         "total": state.get("total"),
     }
     if job:
+        if job.get("remote"):
+            # Where to go and watch it, since the log is on GitHub rather than
+            # streaming through this process.
+            view["run_url"] = job.get("run_url")
         view.update({
             "started_at": job.get("started_at"),
             "finished_at": job.get("finished_at"),
@@ -702,11 +951,11 @@ def _record_sent(to_addr: str, subject: str) -> None:
     if not key:
         return
     db.execute(
-        "INSERT INTO sent_log (email, send_count, last_sent, last_subject, manual) "
+        "INSERT INTO sent_log (email, send_count, last_sent, last_subject, `manual`) "
         "VALUES (%s, 1, %s, %s, 0) "
         "ON DUPLICATE KEY UPDATE send_count = send_count + 1, "
         "  last_sent = VALUES(last_sent), last_subject = VALUES(last_subject), "
-        "  manual = 0",
+        "  `manual` = 0",
         (key, _now_iso(), (subject or "").strip()[:512]))
     db.refresh_sent_for_emails([key])
     dbquery.invalidate_caches()
@@ -749,7 +998,7 @@ def _apply_marks(email_lists: list[list[str]], sent: bool) -> None:
         for email, stamp in rows:
             db.execute(
                 "INSERT INTO sent_log (email, send_count, last_sent, "
-                "  last_subject, manual) VALUES (%s, 1, %s, '', 1) "
+                "  last_subject, `manual`) VALUES (%s, 1, %s, '', 1) "
                 "ON DUPLICATE KEY UPDATE "
                 # A real send already recorded here keeps its stamp, its
                 # subject and its non-manual flag. Assignments are evaluated
@@ -757,7 +1006,7 @@ def _apply_marks(email_lists: list[list[str]], sent: bool) -> None:
                 # the two guards on send_count have to come before it is
                 # raised to 1 -- otherwise they always read the new value.
                 "  last_sent = IF(send_count > 0, last_sent, VALUES(last_sent)), "
-                "  manual = IF(send_count > 0, manual, 1), "
+                "  `manual` = IF(send_count > 0, `manual`, 1), "
                 "  send_count = GREATEST(send_count, 1)",
                 (email, stamp))
             touched.add(email)
@@ -790,6 +1039,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):  # quieter logging
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def _authorised(self) -> bool:
+        """Whether this request may be served at all.
+
+        No token configured means local development, where the server binds
+        127.0.0.1 and the question does not arise. With one set the API is
+        reachable from somewhere else, and every request has to carry it: this
+        API starts scrapes, sends mail through the configured SMTP account,
+        dumps the whole database and executes a raw .sql body, so the open
+        port would otherwise be an open door.
+        """
+        if not API_TOKEN:
+            return True
+        sent = self.headers.get("X-Api-Token", "")
+        # Constant-time, so a wrong token cannot be narrowed down by timing the
+        # rejection. hmac.compare_digest is the stdlib's version of this.
+        return hmac.compare_digest(sent, API_TOKEN)
 
     def _send_json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
@@ -844,6 +1110,9 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length > 0 else b""
 
     def do_GET(self):
+        if not self._authorised():
+            self._send_json({"ok": False, "error": "unauthorised"}, 401)
+            return
         parsed = urlparse(self.path)
         route = parsed.path
         params = parse_qs(parsed.query)
@@ -927,8 +1196,11 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/scrape/status":
             source = params.get("source", [""])[0]
             if source:
+                _refresh_remote(source)
                 self._send_json(_job_view(source))
             else:
+                for s in SOURCES:
+                    _refresh_remote(s["key"])
                 self._send_json({"jobs": [_job_view(s["key"]) for s in SOURCES]})
             return
 
@@ -966,6 +1238,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._authorised():
+            self._send_json({"ok": False, "error": "unauthorised"}, 401)
+            return
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         source = params.get("source", [""])[0]
@@ -1090,7 +1365,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    port = _to_int(sys.argv[1], 8000) if len(sys.argv) > 1 else 8000
+    # An explicit argument wins; otherwise $PORT, which is how every managed
+    # host tells a container where to listen.
+    port = (_to_int(sys.argv[1], 8000) if len(sys.argv) > 1
+            else _to_int(os.environ.get("PORT", ""), 8000))
 
     # MySQL may still be starting (npm run dev launches us in parallel with it),
     # so this waits rather than failing.
@@ -1106,7 +1384,7 @@ def main():
     load_state()
     dbquery.invalidate_caches()
 
-    addr = ("127.0.0.1", port)
+    addr = (BIND_HOST, port)
     httpd = ThreadingHTTPServer(addr, Handler)
     counts = ", ".join(f"{s['key']}={dbquery.source_count(s['key'])}"
                        for s in SOURCES)
@@ -1123,7 +1401,19 @@ def main():
               f"{ENRICH_WORKERS} workers)")
     else:
         print("Enrichment: off (needs ANTHROPIC_API_KEY; ENRICH=0 to disable)")
+    scrapes_at = f"GitHub Actions ({GH_REPO})" if remote_scrapes() else "this process"
+    print(f"Scrapes run in: {scrapes_at}")
+    print(f"Auth: {'on (X-Api-Token)' if API_TOKEN else 'off (local only)'}")
     print(f"Serving on http://{addr[0]}:{addr[1]}  (Ctrl+C to stop)")
+    if BIND_HOST not in ("127.0.0.1", "localhost", "::1") and not API_TOKEN:
+        # Worth interrupting the startup banner for: this endpoint can dump the
+        # database, execute a .sql body and send mail as you, and it is now
+        # listening on a public interface with nothing in front of it.
+        print("\n[WARNING] Bound to a public interface with no API_TOKEN set.\n"
+              "          Anyone who can reach this port can export the whole\n"
+              "          database, execute arbitrary SQL against it, and send\n"
+              "          mail through your SMTP account. Set API_TOKEN.\n",
+              file=sys.stderr)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

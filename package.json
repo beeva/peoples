@@ -21,6 +21,7 @@
     "db:rebuild": "python dbsync.py --force",
     "db:export": "python dbdump.py export",
     "db:import": "python dbdump.py import",
+    "db:copy": "python scripts/copy_to_aiven.py",
     "kill": "node scripts/kill-port.js 8000 3090 && node scripts/mysql-server.js --stop",
     "kill:server": "node scripts/kill-port.js 8000",
     "kill:web": "node scripts/kill-port.js 3090",

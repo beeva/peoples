@@ -1,0 +1,48 @@
+# Nightly dump of the managed database, kept as a workflow artifact.
+#
+# A free database tier is not a backup: it has no point-in-time recovery, and
+# `records` cannot be rebuilt from anywhere -- the scrapers write into it
+# directly and no file stands behind it. This is the safety net, and it needs
+# no machine of your own.
+name: backup
+
+on:
+  schedule:
+    - cron: "0 3 * * *"      # 03:00 UTC, an hour after the scrape
+  workflow_dispatch:
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dump
+        env:
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          # Read by the client from the environment, so it never appears in the
+          # process list or in the workflow log.
+          MYSQL_PWD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+        run: |
+          mysqldump --host="$MYSQL_HOST" --port="$MYSQL_PORT" \
+                    --user="$MYSQL_USER" \
+                    --ssl-mode=REQUIRED \
+                    --databases "$MYSQL_DATABASE" \
+                    --add-drop-database --add-drop-table \
+                    --default-character-set=utf8mb4 \
+                    --max-allowed-packet=64M \
+                    --single-transaction --quick \
+              > dump.sql
+          gzip -9 dump.sql
+          ls -lh dump.sql.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: email_scrapper-${{ github.run_number }}
+          path: dump.sql.gz
+          # Artifacts on a private repository are private. On a public one they
+          # are not -- and this file holds every scraped address and number.
+          retention-days: 30
