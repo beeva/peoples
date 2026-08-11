@@ -79,7 +79,7 @@ the full 12,000+ contact archive.
                                     │  X-Api-Token header
                                     ▼
                     ┌──────────────────────────────┐
-                    │  HF Spaces / Koyeb / Render  │   free container
+                    │  Vercel / Koyeb / Render     │   free
                     │  server.py — the JSON API    │
                     └───────────────┬──────────────┘
                                     │  MySQL over TLS
@@ -108,7 +108,7 @@ sent to the browser, and the shared token stays server-side.
 | layer | recommended | alternatives |
 | --- | --- | --- |
 | **Database** | **Aiven for MySQL** — free plan, 1 CPU / 1 GB / 5 GB disk | TiDB Cloud Starter (25 GB, MySQL-compatible) |
-| **API** | **Hugging Face Spaces** — Docker, free, 2 vCPU / 16 GB, no idle sleep | Koyeb free instance; Render free (sleeps) |
+| **API** | **Vercel** (a second project — see VERCEL.md) or **Koyeb**'s free instance | Render free (sleeps after 15 min idle) |
 | **Frontend** | **Vercel Hobby** | Cloudflare Pages, Netlify |
 | **Scrapers** | **GitHub Actions** | — |
 
@@ -117,6 +117,12 @@ Three provider notes that will save you an afternoon:
 - **PlanetScale removed its free tier** in 2024. **Railway** is trial-credit,
   not free. **Clever Cloud's** free MySQL is 10 MB — about 1/14th of what you
   need.
+- **Hugging Face Spaces looks like a fit and was not.** Tried and abandoned: a
+  free account is allocated *zero* CPU quota, so a Space accepts the code and
+  the secrets, then refuses to start with `Quota exceeded for flavor cpu-basic
+  (requested=1): current=0, limit=0`. It is not about the Space being private —
+  making it public changed nothing — and not about contention, since the
+  account owned exactly one paused Space. Running one needs PRO.
 - **Do not switch to free Postgres** (Neon, Supabase) to chase a bigger free
   tier. This project is MySQL all the way down: PyMySQL, `mysqldump`-based
   export/import, backtick-quoted DDL, `INSERT … ON DUPLICATE KEY UPDATE`,
@@ -324,46 +330,36 @@ plus `default-mysql-client` (so `db:export` / `db:import` keep working), sets
 `.dockerignore` keeps `db/data`, `backups/`, `.env` and the whole frontend out
 of the image.
 
-### 3.2 Deploy — Hugging Face Spaces (recommended)
+### 3.2 Deploy — a free container host
 
-2 vCPU, 16 GB RAM, no 15-minute idle sleep, and private Spaces are free.
-
-1. [huggingface.co/new-space](https://huggingface.co/new-space) → **SDK:
-   Docker** → **Blank** → **Private**.
-2. Put this frontmatter at the top of the Space's `README.md` so it serves the
-   right port:
-
-   ```yaml
-   ---
-   title: email-scrapper API
-   sdk: docker
-   app_port: 7860
-   pinned: false
-   ---
-   ```
-
-3. Push:
-
-   ```bash
-   git remote add space https://huggingface.co/spaces/<you>/email-scrapper-api
-   git push space main
-   ```
-
-4. **Settings → Variables and secrets** → add everything from
-   [§3.4](#34-environment-variables) as *Secrets*.
-
-The API is then at `https://<you>-email-scrapper-api.hf.space`.
-
-### 3.3 Deploy — Render or Koyeb instead
-
-**Render** — **New → Web Service** → connect the repo → **Runtime: Docker** →
-**Instance type: Free** → **Health check path: `/api/db/status`**. Free services
-spin down after 15 minutes idle and take 30–60 s to wake; see
-[§12](#12-cold-starts-sleeping-and-keeping-it-awake).
+Pick by whether you mind the container going to sleep. Both build the
+`Dockerfile` above straight from the private GitHub repo, so the source stays
+private either way.
 
 **Koyeb** — **Create Web Service** → GitHub → Dockerfile → **Free instance**,
 health check `/api/db/status`. Historically Koyeb's free instance does not
-sleep.
+idle-sleep, which makes it the better of the two.
+
+**Render** — **New → Web Service** → connect the repo → **Runtime: Docker** →
+**Instance type: Free** → **Health check path: `/api/db/status`**. Free
+services spin down after 15 minutes idle and take 30–60 s to wake; see
+[§12](#12-cold-starts-sleeping-and-keeping-it-awake).
+
+Whichever you pick, choose the region closest to your database, then add
+everything from [§3.4](#34-environment-variables) as environment variables.
+The API is then at that host's URL.
+
+### 3.3 Deploy — a second Vercel project instead
+
+If the frontend is already on Vercel, the API can be too: one platform, no new
+account, and the files for it are committed (`api/index.py`, `vercel.json`,
+`public/`). It costs you background enrichment, `/api/db/export`, and anything
+over 60 s. **[VERCEL.md](VERCEL.md) is the complete walkthrough** — it is the
+path this project actually took.
+
+> If a health check gets a 401, that is `API_TOKEN` doing its job. It still
+> proves the process is alive, and most platforms treat any response as
+> healthy; if yours insists on a 2xx, point the check at `/` or drop it.
 
 Either way: pick the region closest to your database.
 
@@ -417,7 +413,7 @@ entirely if you would rather not spend credits from a service that may restart.
 The startup banner tells you almost everything at once:
 
 ```
-[db] avnadmin@mysql-xxxxxxx.aivencloud.com:12345/email_scrapper ready
+[db] avnadmin@<your-host>.aivencloud.com:<port>/email_scrapper ready
 Loaded 12794 contacts (discourse=589, aboutme=410, github=11795)
 Messaging: generate=on, send=on, from=you@gmail.com (2629 recipients messaged)
 Enrichment: on (2059 cached, 2 workers)
@@ -440,7 +436,7 @@ while bound to `0.0.0.0` prints a loud warning; do not ignore it.
 
    | name | value |
    | --- | --- |
-   | `API_BASE_URL` | `https://<you>-email-scrapper-api.hf.space` |
+   | `API_BASE_URL` | your API host's URL |
    | `API_TOKEN` | the same token the API has |
    | `UI_USER` | a username you choose |
    | `UI_PASS` | a strong password |
@@ -556,9 +552,12 @@ is what you want locally.
 
 ## 11. Alternative — everything on Vercel
 
-Fewest accounts of any option: one platform, one deploy, no separate API host.
+Fewest accounts of any option: one platform, two projects, no separate API host.
 Vercel's Python runtime serves a `BaseHTTPRequestHandler` subclass directly, and
 `server.py`'s `Handler` is exactly that, so the glue is small.
+
+> **[VERCEL.md](VERCEL.md) is the full walkthrough for this path**, with the
+> exact variables and the verification steps. What follows is the summary.
 
 Take this path for the simplest possible operation. Do **not** take it if
 enrichment matters.
@@ -620,7 +619,7 @@ data, and the first visit of the day looks broken.
 
 In order of preference:
 
-1. **Use a host that does not sleep** — Hugging Face Spaces or Koyeb. This
+1. **Use a host that does not sleep** — Vercel functions or Koyeb. This
    removes the problem rather than papering over it, and costs nothing.
 2. **Ping it externally** — [UptimeRobot](https://uptimerobot.com) (50 monitors
    free, 5-minute interval) or [cron-job.org](https://cron-job.org) against
@@ -682,7 +681,7 @@ The first thing you would ever pay for is the database, and not soon.
 ## 15. Verification
 
 ```bash
-API=https://your-api.hf.space
+API=https://your-api-host
 TOK=your-api-token
 
 # 1. Auth works -- this MUST be 401, not data.
@@ -751,7 +750,7 @@ And in the browser:
 
 1. Aiven free MySQL; note the region; raise `max_allowed_packet`.
 2. `npm run db:export`, then import into Aiven.
-3. Deploy the repo to a private Hugging Face Docker Space; set the secrets from
+3. Deploy the API — a second Vercel project, or Koyeb; set the secrets from
    [§3.4](#34-environment-variables).
 4. Vercel, root directory `web`, four environment variables.
 5. Add the repository secrets; run `scrape.yml` once by hand.

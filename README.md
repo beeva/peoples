@@ -384,11 +384,15 @@ a different backend, copy `web/.env.example` to `web/.env.local` and edit it.
 
 ## Deployment
 
-**[DEPLOY.md](DEPLOY.md)** is the full guide: a free, fully managed stack —
-Vercel for the UI, a free container for the API, managed MySQL, and GitHub
-Actions for the scrapers. **[CREDENTIALS.md](CREDENTIALS.md)** covers the other
-half — where every key and token comes from, and where each one has to be
-pasted.
+Three guides, by what you need:
+
+- **[VERCEL.md](VERCEL.md)** — the deployment this project runs: two Vercel
+  projects (the app and the API) against managed MySQL, with scrapes on GitHub
+  Actions. Start here.
+- **[DEPLOY.md](DEPLOY.md)** — the wider picture: what else the stack could run
+  on, what each host costs you, and why.
+- **[CREDENTIALS.md](CREDENTIALS.md)** — where every key and token comes from,
+  and which of the three places each one has to be pasted into.
 
 The code for it is here and every part of it is **off by default**, so nothing
 below changes how the project runs locally:

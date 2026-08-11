@@ -56,7 +56,7 @@ The same secret often has to be pasted into more than one place, and getting
 this wrong is the commonest deployment failure. `API_TOKEN` in particular must
 be **byte-identical** in two places or every request 401s.
 
-| Value | Local `.env` | API host (HF/Koyeb/Render) | Vercel | GitHub repo secrets |
+| Value | Local `.env` | API host | Vercel | GitHub repo secrets |
 | --- | :---: | :---: | :---: | :---: |
 | `MYSQL_HOST` / `PORT` / `USER` / `PASSWORD` / `DATABASE` | — | ✅ | — | ✅ |
 | `MYSQL_SSL=1` | — | ✅ (in the Dockerfile) | — | ✅ |
@@ -340,7 +340,7 @@ write. The same three codes come back through the UI as
 
 | Host | Looks like |
 | --- | --- |
-| Hugging Face Space | `https://<you>-email-scrapper-api.hf.space` |
+| Vercel (API project) | `https://<your-api-project>.vercel.app` |
 | Koyeb | `https://<app>-<org>.koyeb.app` |
 | Render | `https://<name>.onrender.com` |
 
@@ -429,8 +429,8 @@ account, and a new Gmail app password does not invalidate the others.
   placeholder in `scrapers/github/README.md`. Re-check after any close call
   with `git log --all -p -- .env` (expect no output) and
   `git log --all -S "sk-ant-api03" --oneline`.
-- Use each platform's secret store — Aiven, Hugging Face **Settings → Variables
-  and secrets**, Vercel **Environment Variables**, GitHub **Actions secrets**.
+- Use each platform's secret store — Aiven, Vercel **Environment Variables**,
+  GitHub **Actions secrets**.
   Never bake a secret into the Docker image; `.dockerignore` excludes `.env`
   for exactly this reason.
 - Set expiries on both GitHub tokens. A 90-day expiry that breaks a scrape is a
