@@ -203,9 +203,17 @@ const buildIndex = cache(
   }> => {
     const workspaces = await listWorkspaces();
     const byKey = new Map<string, ServerData[]>();
-    for (const w of workspaces) {
-      const users = await readWorkspace(w.slug);
-      for (const u of users) {
+    // One HTTP round trip per workspace. Awaiting them one at a time costs
+    // nothing noticeable against a server on loopback, and is ruinous once the
+    // API is a separate deployment: fourteen workspaces at a few seconds each
+    // took the /slack page to 54s, against a 60s function limit. The requests
+    // do not depend on each other, so issue them together and leave the loop
+    // below to do only the grouping.
+    const perWorkspace = await Promise.all(
+      workspaces.map((w) => readWorkspace(w.slug)),
+    );
+    for (const [i, w] of workspaces.entries()) {
+      for (const u of perWorkspace[i]) {
         const fields = flattenUser(u);
         const email = String(fields["profile.email"] || "").toLowerCase();
         const key = email || `${w.slug}:${fields.id ?? ""}`;

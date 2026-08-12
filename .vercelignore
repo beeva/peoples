@@ -1,0 +1,42 @@
+# What NOT to upload to the API project (see VERCEL.md, Step 1).
+#
+# This project's root is deployed as-is, so the deny-list matters more than
+# usual: db/ is the local MySQL data directory (~350 MB) and backups/ holds
+# .sql dumps (~50 MB). Neither is reachable from the function -- the deployed
+# API talks to Aiven -- and a serverless bundle is capped at 250 MB unzipped,
+# so shipping them would fail the deploy rather than merely waste time.
+#
+# The frontend is a SEPARATE Vercel project deployed from web/, which is why
+# web/ (and its ~500 MB of node_modules) is excluded here too.
+
+# The local database and its dumps -- the deployed API uses Aiven instead.
+db
+backups
+
+# The frontend: its own project, its own deployment.
+web
+
+node_modules
+__pycache__
+*.pyc
+*.log
+
+# Secrets. Real environment variables win over .env (see server.py's
+# _load_dotenv), so this could not override the platform's values even if it
+# were uploaded -- but a bundle is not a place to keep credentials.
+.env
+.env.local
+
+.git
+TODO
+
+# Scraper runtime state and legacy data files. The scrapers themselves are
+# uploaded: server.py builds argv paths under scrapers/, and those paths have
+# to resolve even though a deployed scrape is dispatched to GitHub Actions.
+scrapers/**/.cursor
+scrapers/**/*.json
+scrapers/**/*.jsonl
+scrapers/slack/users
+
+# Documentation: useful in the repo, dead weight in a function bundle.
+*.md

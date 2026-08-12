@@ -95,6 +95,13 @@ detail, CSV export, phone/WhatsApp, message generation, and SMTP sending.
 
 ## 3. Status: what is already done
 
+**Both projects are deployed and live** on team `kyvex-s-team`:
+
+| | |
+| --- | --- |
+| API | ✅ <https://email-scrapper-api.vercel.app> |
+| Frontend | ✅ <https://email-scrapper-web.vercel.app> |
+
 | | |
 | --- | --- |
 | Aiven MySQL 8.4.8 | ✅ running, TLS verified, `max_allowed_packet` 64 MB |
@@ -102,11 +109,20 @@ detail, CSV export, phone/WhatsApp, message generation, and SMTP sending.
 | `ANTHROPIC_API_KEY` | ✅ `claude-opus-5` responds |
 | `GITHUB_TOKEN` | ✅ 5,000/hr core, 30/min search |
 | Gmail SMTP | ✅ app password accepted |
-| `API_TOKEN` | ✅ generated |
+| `API_TOKEN` | ✅ generated, and enforced — an untokened request gets 401 |
+| `UI_USER` / `UI_PASS` | ✅ set on the frontend project; an unauthenticated page load gets 401 |
+| Source exposure | ✅ `server.py`, `db.py`, `.env.example` all 404 on the API domain |
+| `SKIP_BOOTSTRAP` | ✅ `1` — set after the first deploy, as below |
 | `GH_DISPATCH_TOKEN` | ❌ cannot see this repo — [Step 4](#step-4--fix-the-dispatch-token) |
-| `UI_USER` / `UI_PASS` | — you choose them at [Step 2](#step-2--deploy-the-frontend) |
+
+Verified against the running deployment: `/api/stats` returns 12,794 contacts in
+about 1.9s warm, and every route in `server.py` answers with live Aiven data.
 
 Only the dispatch token is outstanding, and it affects one button.
+
+The plan is **Hobby**, which caps a function at **60 seconds**. That is the
+budget everything below has to fit inside, and one page gets close to it — see
+[Troubleshooting](#troubleshooting).
 
 ---
 
@@ -204,6 +220,46 @@ Four things worth knowing:
 > Vercel Hobby is licensed for non-commercial use. If this directory feeds paid
 > outreach, Cloudflare Pages and Netlify both run Next.js 15 free with no such
 > clause — same four variables, same root directory.
+
+---
+
+## Redeploying from the command line
+
+Both projects were created and deployed this way, and it is the quickest way to
+ship a change without going through the dashboard. `VERCEL_TOKEN` lives in
+`.env`; the link state is in each directory's git-ignored `.vercel/`.
+
+```bash
+export VERCEL_TOKEN=$(grep -m1 '^VERCEL_TOKEN=' .env | cut -d= -f2- | tr -d '\r\n')
+
+npx vercel deploy --prod --yes --archive=tgz                    # the API
+( cd web && npx vercel deploy --prod --yes --archive=tgz )      # the frontend
+```
+
+The `tr -d '\r\n'` is not decoration: `.env` has CRLF line endings, and a token
+with a trailing carriage return is rejected as invalid with no hint as to why.
+
+Three things that will bite otherwise.
+
+**Deploy the frontend from inside `web/`, not with `--cwd web`.** The CLI reads
+`vercel.json` from the directory it is invoked in while uploading files from
+`--cwd`, so the root config — which sets `buildCommand` to empty for the API —
+is applied to the frontend, `next build` never runs, and the deployment goes
+live serving nothing. It fails as `MIDDLEWARE_INVOCATION_FAILED` on every
+request including unauthenticated ones, which reads like an auth bug and is not
+one. The parentheses above run the `cd` in a subshell so it cannot leak.
+
+**`buildCommand` is `""` in `vercel.json` on purpose.** The root
+`package.json` has a `build` script that builds `web/`, and Vercel runs it by
+default — in the API project, where `web/` is deliberately absent. That is the
+`ENOENT: /vercel/path0/web/package.json` failure. The API needs no build step:
+its Python dependencies install from `requirements.txt` automatically, and
+`public/` is served as-is.
+
+**`.vercelignore` is load-bearing, not tidiness.** The API deploys the
+repository root, where `db/` is the local MySQL data directory at ~350 MB and
+`backups/` holds dumps at ~50 MB. A serverless bundle is capped at 250 MB
+unzipped, so without the deny-list the deploy fails outright.
 
 ---
 
@@ -385,6 +441,8 @@ external pinger keeps it warm. Both take the same variables as Step 1 with
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | Every API route 404s, body shows `received_path` | the rewrite delivered the destination path | compare `received_path` against `vercel.json`'s `rewrites` and adjust the rule |
+| Every page 500s with `MIDDLEWARE_INVOCATION_FAILED`, even without credentials | the frontend was deployed with `--cwd web`, so the root `vercel.json` skipped `next build` | redeploy from inside `web/` — see [Redeploying from the command line](#redeploying-from-the-command-line) |
+| `/slack` is slow, or times out at 60s | the "All Users" view pulls every workspace in full — ~15.7 MB, one 7.5 MB workspace alone | see the note below |
 | Function fails at import, `unsupported operand type(s) for \|` | Vercel gave it Python < 3.10; `db.py` uses `str \| None` | pin Python 3.12 in the project's settings |
 | Every route 401s from the UI | the two `API_TOKEN` values differ | compare character by character |
 | UI: "Could not reach the data server" | wrong `API_BASE_URL`, or the API project failed to build | open `$API/api/db/status` directly |
@@ -396,3 +454,33 @@ external pinger keeps it warm. Both take the same variables as Step 1 with
 | `server.py` or `.env.example` fetchable on the API domain | `outputDirectory` is not `public` | check `vercel.json` |
 | List empty after a schema change | migration dropped the derived tables | `npm run db:rebuild-contacts` |
 | `npm run db:start` says "already listening" | `.env` points `MYSQL_*` at Aiven | override on the command line — see [Loading the database](#loading-the-database) |
+
+### The `/slack` page and the 60-second limit
+
+`/slack`'s default "All Users" view deduplicates people across every workspace,
+which means reading every workspace in full on each load: five workspaces,
+8,405 members, **~15.7 MB**, of which `DesignZoo` alone is 7.5 MB.
+
+`web/lib/slack.ts` used to await those reads one at a time. On loopback that
+costs nothing; with the API a separate deployment it made the page **54 s**
+against a hard 60 s ceiling. They are independent requests, so they now issue
+together via `Promise.all`, which brought the page to **~40 s** — bounded by the
+single largest workspace rather than by their sum.
+
+That is working, and it is still too close to the ceiling to be comfortable. If
+it starts timing out, the cause is worth knowing before picking a fix: the cost
+is **the transfer itself**, not the processing. Measured against Aiven, fetching
+`DesignZoo` takes 12–27 s while parsing it takes 0.03 s and re-serialising it
+0.02 s. So anything that optimises CPU is wasted effort, and PyMySQL rules out
+the obvious network fix — it accepts a `compress` argument and then raises
+`NotImplementedError`. What remains is sending less or sending it less often:
+
+- **Cache it.** `readWorkspace` uses `cache: "no-store"`. Slack exports change
+  only when one is imported, so a `revalidate` of even a few minutes would make
+  every load after the first instant. This is the cheapest fix by a wide margin.
+- **Send fewer fields.** `/api/slack/users` returns each user's whole stored
+  record; the table renders a fraction of it. Projecting server-side would cut
+  the payload several-fold, at the cost of `deriveColumns` no longer discovering
+  columns on its own.
+- **Paginate**, as `/api/emails` already does — the largest change, and the only
+  one that stays bounded however much the archive grows.

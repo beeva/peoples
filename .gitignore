@@ -40,6 +40,9 @@ scrapers/slack/users/
 *.jsonl.bak
 *.jsonl.tmp
 
+# Vercel CLI link state: the project/org ids this checkout deploys to.
+.vercel/
+
 # Local env
 .env
 .env.local

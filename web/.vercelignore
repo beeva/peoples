@@ -1,0 +1,8 @@
+# The frontend project is deployed from this directory, so only web/ is
+# uploaded. Vercel already skips node_modules and .next; listing them makes the
+# intent explicit and keeps a stray local build out of the upload.
+node_modules
+.next
+out
+tsconfig.tsbuildinfo
+.env.local
