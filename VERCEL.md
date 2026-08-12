@@ -474,6 +474,8 @@ external pinger keeps it warm. Both take the same variables as Step 1 with
 | Every API route 404s, body shows `received_path` | the rewrite delivered the destination path | compare `received_path` against `vercel.json`'s `rewrites` and adjust the rule |
 | Every page 500s with `MIDDLEWARE_INVOCATION_FAILED`, even without credentials | the frontend was deployed with `--cwd web`, so the root `vercel.json` skipped `next build` | redeploy from inside `web/` — see [Redeploying from the command line](#redeploying-from-the-command-line) |
 | `/slack` is slow, or times out at 60s | the "All Users" view pulls every workspace in full — ~15.7 MB, one 7.5 MB workspace alone | see the note below |
+| Rescrape shows `+0`, or the scrape reads `idle` while it is plainly running, or Stop says "not running" | in-memory job state on a host that gives every request a different instance | fixed — see the note below |
+| `/api/db/export` returns 501 | a serverless filesystem is read-only, and `mysqldump` is not in the image | `npm run db:export` locally, or take the `backup` workflow's artifact |
 | Function fails at import, `unsupported operand type(s) for \|` | Vercel gave it Python < 3.10; `db.py` uses `str \| None` | pin Python 3.12 in the project's settings |
 | Every route 401s from the UI | the two `API_TOKEN` values differ | compare character by character |
 | UI: "Could not reach the data server" | wrong `API_BASE_URL`, or the API project failed to build | open `$API/api/db/status` directly |
@@ -485,6 +487,33 @@ external pinger keeps it warm. Both take the same variables as Step 1 with
 | `server.py` or `.env.example` fetchable on the API domain | `outputDirectory` is not `public` | check `vercel.json` |
 | List empty after a schema change | migration dropped the derived tables | `npm run db:rebuild-contacts` |
 | `npm run db:start` says "already listening" | `.env` points `MYSQL_*` at Aiven | override on the command line — see [Loading the database](#loading-the-database) |
+
+### Scrape state cannot live in memory here
+
+`server.py` keeps running scrapes in `JOBS`, a module-level dict. That is
+correct for a server that stays up, and wrong on Vercel, where **every request
+may be served by a different instance** — fourteen consecutive status polls came
+back from fourteen distinct ones. The instance that took the Rescrape click held
+the only record of the run; every later poll landed somewhere that had never
+heard of it.
+
+Three symptoms, one cause:
+
+- **`Scraping… +0`** — the counter is `now − a baseline taken at dispatch`, and
+  the polling instance had no baseline.
+- **`idle` during a run** — no job in `JOBS` reads as nothing happening.
+- **Stop → "not running"** — same lookup, same empty dict.
+
+A dispatch is now also written to `STATE`, which is a table in the database, so
+any instance can recover a run it did not start (`_adopt_remote`). The counter
+climbs across instances, Stop cancels the real run, and the marker is retired
+when the run ends so a finished run is never re-adopted as a live one. A
+dispatch that never becomes a run is written off after ten minutes rather than
+pinning the button at "running" forever.
+
+Worth knowing if you add anything stateful: **on this host, module-level state
+survives only until the next request.** Anything that has to outlive a single
+response belongs in the database.
 
 ### The `/slack` page and the 60-second limit
 

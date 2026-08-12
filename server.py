@@ -25,6 +25,7 @@ Configuration comes from a `.env` file next to this script -- see
     python server.py            # http://127.0.0.1:8000
     python server.py 9000       # custom port
 """
+import errno
 import hmac
 import json
 import os
@@ -507,6 +508,67 @@ _GH_CONCLUSIONS = {
 }
 
 
+# How long a dispatch may sit with no matching run before it is written off.
+# A workflow_dispatch that GitHub accepted normally produces a run within
+# seconds; a queue can stretch that, but not to ten minutes. Without a limit a
+# dispatch that never became a run would pin the button at "running" forever,
+# and nothing would ever clear it.
+STALE_DISPATCH_SECONDS = 600
+
+
+def _adopt_remote(key: str) -> dict | None:
+    """Rebuild the in-memory job for a dispatch this process did not make.
+
+    JOBS lives in one process's memory, which is enough for a server that stays
+    up and wrong on a serverless host, where each request may be served by a
+    different instance. The instance that dispatched a run is then almost never
+    the one answering the status poll: every poll reported `idle` while a scrape
+    was plainly running, and the button's "+N" stayed at zero because nothing
+    the polling instance could see held a baseline to subtract.
+
+    The dispatch is also recorded in STATE, which is in the database, so any
+    instance can pick the run back up from there.
+    """
+    marker = (STATE.get(key) or {}).get("remote")
+    if not marker:
+        return None
+    with JOBS_LOCK:
+        JOBS[key] = {
+            "source": key,
+            "status": "running",
+            "remote": True,
+            "dispatched_at": marker.get("dispatched_at"),
+            "dispatched_epoch": marker.get("dispatched_epoch"),
+            "started_at": marker.get("dispatched_at"),
+            "finished_at": None,
+            "before": marker.get("before"),
+            "added": None,
+            "total": None,
+            "returncode": None,
+            "message": f"running on GitHub Actions ({GH_REPO})",
+            "pid": None,
+            "proc": None,
+            "run_id": None,
+            "run_url": f"https://github.com/{GH_REPO}/actions",
+            "stop_requested": False,
+            "log": deque(maxlen=300),
+        }
+        return JOBS[key]
+
+
+def _abandon_remote(key: str, why: str) -> None:
+    """Give up on a dispatch that never became a run."""
+    with JOBS_LOCK:
+        job = JOBS.get(key)
+        if job:
+            job.update(status="error", finished_at=_now_iso(), message=why)
+    with STATE_LOCK:
+        prev = STATE.get(key) or {}
+        STATE[key] = {**prev, "last_run": _now_iso(), "last_status": "error",
+                      "remote": None}
+    save_state(key)
+
+
 def _refresh_remote(key: str) -> None:
     """Fold the state of the dispatched run into this source's job entry.
 
@@ -515,10 +577,19 @@ def _refresh_remote(key: str) -> None:
     scrape operation for as long as GitHub took to answer.
     """
     job = JOBS.get(key)
-    if not job or not job.get("remote") or job.get("status") != "running":
-        return
+    if job and not job.get("remote") and job.get("status") == "running":
+        return                      # a local subprocess owns this one
+    if not job or job.get("status") != "running":
+        # Nothing running here -- but another instance may have dispatched it.
+        job = _adopt_remote(key)
+        if job is None:
+            return
     run = _gh_latest_run(key)
     if not run:
+        started = job.get("dispatched_epoch")
+        if started and (time.time() - started) > STALE_DISPATCH_SECONDS:
+            _abandon_remote(key, "dispatched, but no run ever appeared on "
+                                 "GitHub Actions")
         return
     # A dispatch answers before the run exists. Until one appears that is newer
     # than the click, the job stays "running" on the strength of the dispatch
@@ -539,28 +610,53 @@ def _refresh_remote(key: str) -> None:
         job["message"] = message
         if status != "running" and not job.get("finished_at"):
             job["finished_at"] = _now_iso()
+    # Read the count on every poll, not only when the run ends. The runner
+    # writes into the same database this process reads, so a remote scrape's
+    # progress is visible here as it happens -- which is what the button's
+    # "+N" is showing. Reading it only at the end left that at zero for the
+    # whole run and then, because nothing set it, at zero afterwards too.
+    #
+    # Best-effort: the status above is the part that matters, and a poll must
+    # not 500 because the database blinked while a run was finishing. The next
+    # poll picks it up.
+    try:
+        total = _live_count(key)
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] could not read {key} count during the run: {e}",
+              file=sys.stderr)
+        return
+    before = job.get("before")
+    # Clamped: a merge or a delete landing mid-run can put the total below the
+    # baseline, and "+-4 new" is worse than saying nothing happened.
+    added = None if before is None else max(0, total - before)
+    with JOBS_LOCK:
+        job["total"] = total
+        job["added"] = added
     if status != "running":
-        # The counts live in the database the runner wrote to, so read the
-        # total from there rather than from anything the workflow reports.
-        # Best-effort: the job status above is the part that matters, and a
-        # status poll must not 500 because the database blinked while a run was
-        # finishing -- the next poll picks it up.
-        try:
-            total = dbquery.source_count(key)
-        except Exception as e:  # noqa: BLE001
-            print(f"[warn] could not read {key} count after the run: {e}",
-                  file=sys.stderr)
-            return
         with STATE_LOCK:
             prev = STATE.get(key) or {}
+            # "remote": None retires the marker -- the run is over, and leaving
+            # it would have the next instance adopt a finished run as running.
             STATE[key] = {**prev, "last_run": _now_iso(), "last_status": status,
-                          "total": total}
+                          "added": added, "total": total, "remote": None}
         save_state(key)
 
 
 def _dispatch_scrape(key: str, params: dict) -> dict:
     """Ask GitHub Actions to run the scrape, and remember that we did."""
     dispatched_at = _now_iso()
+    # The count as it stands before the runner starts writing. A remote scrape
+    # has no subprocess to watch, so this is the only way to know how much of
+    # what is in the database now arrived during *this* run -- _refresh_remote
+    # subtracts it on every poll. Best-effort: a dispatch is worth doing even
+    # if the count cannot be read, and a missing baseline shows as "no number
+    # yet" rather than a wrong one.
+    try:
+        before = dbquery.source_count(key)
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] could not read {key} count before dispatch: {e}",
+              file=sys.stderr)
+        before = None
     try:
         _gh(f"/repos/{GH_REPO}/actions/workflows/{GH_WORKFLOW}/dispatches",
             "POST", {"ref": GH_REF,
@@ -577,8 +673,10 @@ def _dispatch_scrape(key: str, params: dict) -> dict:
             "status": "running",
             "remote": True,
             "dispatched_at": dispatched_at,
+            "dispatched_epoch": time.time(),
             "started_at": dispatched_at,
             "finished_at": None,
+            "before": before,
             "added": None,
             "total": None,
             "returncode": None,
@@ -590,6 +688,16 @@ def _dispatch_scrape(key: str, params: dict) -> dict:
             "stop_requested": False,
             "log": deque(maxlen=300),
         }
+    # Persist the dispatch, not just remember it. JOBS is this process's memory;
+    # on a serverless host the instance that answers the next status poll is a
+    # different one, and without this it would see nothing in flight and report
+    # the scrape as idle. See _adopt_remote.
+    with STATE_LOCK:
+        prev = STATE.get(key) or {}
+        STATE[key] = {**prev, "remote": {"dispatched_at": dispatched_at,
+                                         "dispatched_epoch": time.time(),
+                                         "before": before}}
+    save_state(key)
     with _GH_CACHE_LOCK:
         _GH_CACHE.pop("runs", None)     # don't answer the first poll from before
     return {"ok": True, "job": _job_view(key)}
@@ -631,6 +739,14 @@ def stop_scrape(key: str) -> dict:
     """Request a running scrape to stop. Partial progress already on disk is kept."""
     if key not in SOURCE_BY_KEY:
         return {"ok": False, "error": f"unknown source '{key}'"}
+    # A dispatched run is remembered by whichever instance took the click, and
+    # on a serverless host that is very unlikely to be this one. Recover it from
+    # STATE before concluding there is nothing to stop, and let _refresh_remote
+    # fill in the run id that cancelling needs -- without this, Stop answered
+    # "not running" for a scrape the same UI was showing as running.
+    cur = JOBS.get(key)
+    if (not cur or cur.get("status") != "running") and _adopt_remote(key):
+        _refresh_remote(key)
     with JOBS_LOCK:
         job = JOBS.get(key)
         if not job or job.get("status") != "running":
@@ -681,6 +797,12 @@ def _job_view(key: str) -> dict:
             "message": job.get("message"),
             "log": list(job.get("log", []))[-30:],
         })
+        # STATE's total is the figure as of the last *finished* run. While one
+        # is in flight the job has a fresher one, and reporting a live "added"
+        # next to a stale "total" invites the reader to add them together and
+        # get a number that was never true.
+        if job.get("total") is not None:
+            view["total"] = job["total"]
     return view
 
 
@@ -1229,6 +1351,26 @@ class Handler(BaseHTTPRequestHandler):
             # and the browser shows real download progress.
             try:
                 result = dbdump.export_sql(params.get("file", [""])[0] or None)
+            except OSError as e:
+                # A serverless deployment has a read-only filesystem, so this
+                # route cannot work there and never will: the dump is written
+                # to disk before it is served, and mysqldump is not in the
+                # image either. `[Errno 30] Read-only file system` on its own
+                # reads like a bug in the export; say what it actually means
+                # and where the working path is.
+                if e.errno == errno.EROFS:
+                    self._send_json({
+                        "ok": False,
+                        "error": "This deployment has a read-only filesystem, "
+                                 "so the database cannot be exported here. Run "
+                                 "`npm run db:export` locally against the same "
+                                 "database, or use the nightly `backup` "
+                                 "workflow on GitHub Actions, which uploads the "
+                                 "dump as a run artifact.",
+                    }, 501)
+                    return
+                self._send_json({"ok": False, "error": str(e)}, 500)
+                return
             except Exception as e:  # noqa: BLE001
                 self._send_json({"ok": False, "error": str(e)}, 500)
                 return
