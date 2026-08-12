@@ -113,14 +113,16 @@ detail, CSV export, phone/WhatsApp, message generation, and SMTP sending.
 | `UI_USER` / `UI_PASS` | ✅ set on the frontend project; an unauthenticated page load gets 401 |
 | Source exposure | ✅ `server.py`, `db.py`, `.env.example` all 404 on the API domain |
 | `SKIP_BOOTSTRAP` | ✅ `1` — set after the first deploy, as below |
-| `GH_DISPATCH_TOKEN` | ✅ reaches the repo, Actions readable; **write untested** — [Step 4](#step-4--fix-the-dispatch-token) |
+| `GH_DISPATCH_TOKEN` | ✅ dispatch **proven** — a Rescrape run reached GitHub and completed |
+| Actions secrets | ✅ all seven set — [Step 3](#step-3--github-actions-secrets) |
+| A real scrape | ✅ `scrape github --limit 20` green end to end, new rows visible through the API |
+| The nightly backup | ✅ `backup` green, 8.7 MB dump artifact |
 
 Verified against the running deployment: `/api/stats` returns 12,794 contacts in
 about 1.9s warm, and every route in `server.py` answers with live Aiven data.
 
-Nothing is outstanding. The one unproven step is whether the dispatch token may
-*write* to Actions, which only a real workflow run can show — pressing Rescrape
-once settles it.
+Nothing is outstanding. Deployment, database, scrapes and backups have each been
+run end to end against the live stack.
 
 The plan is **Hobby**, which caps a function at **60 seconds**. That is the
 budget everything below has to fit inside, and one page gets close to it — see
@@ -285,24 +287,41 @@ secret**:
 cannot be created as a secret; `scrape.yml` maps `SCRAPE_GITHUB_TOKEN` back to
 `GITHUB_TOKEN` inside the job. `MYSQL_SSL: "1"` is already in the workflows.
 
+**Done — all seven are set**, and a `scrape github --limit 20` run has gone
+green against them, with the new rows visible through the deployed API.
+
+Until they were set, every run failed, and the reason a *missing* secret is
+worth a paragraph is that Actions does not omit one — it exports it as the
+empty string. `os.environ.get(key, default)` returns its default only for an
+absent variable, so the whole `MYSQL_*` block arrived as `""`. That used to
+crash at import with `invalid literal for int() with base 10: ''`, naming a
+line of `db.py` rather than the missing secret. It now falls back and fails at
+the connection instead:
+
+```
+RuntimeError: could not reach MySQL at :3307 after 60s
+  ((2003, "Can't connect to MySQL server on 'localhost'"))
+```
+
+The empty host in `at :3307` is the tell: not a network problem, an unset
+secret.
+
 ---
 
 ## Step 4 — Fix the dispatch token
 
-**Resolved.** `GH_DISPATCH_TOKEN` now reaches the repository: `GET
-/repos/beeva/email-scrapper` returns **200**, and listing the repository's
-workflows returns **200** with all three (`scrape`, `backup`, `seed`), which
-confirms **Actions: read**.
+**Resolved, and proven.** `GH_DISPATCH_TOKEN` reaches the repository and its
+dispatches run: a Rescrape-style `workflow_dispatch` of `scrape.yml` started a
+job that completed successfully. Nothing here needs doing.
 
-What is *not* confirmed is Actions: **write**, and it cannot be confirmed
-cheaply. A fine-grained PAT returns 404 rather than 403 when a permission is
-missing, so dispatching a deliberately non-existent workflow — which returns
-404 — proves nothing either way. The only real test is a dispatch that runs
-something. Press **Rescrape** once, or run the `backup` workflow from the
-Actions tab; if it starts, the permission is there.
+It is worth recording how *not* to check this, because the obvious probe is
+worthless. A fine-grained PAT returns 404 rather than 403 when a permission is
+missing, so dispatching a deliberately non-existent workflow returns 404 whether
+the token may write or not. Only a dispatch that actually runs something settles
+it.
 
-If it turns out to be missing, the fix is below. This is also the original
-diagnosis, kept because the symptom is easy to misread — the token
+The original diagnosis is kept below, because the symptom is easy to misread —
+the token
 authenticated correctly the whole time and still returned 404 for the
 repository, which looks like a bad token and is really scope. Fine-grained PATs
 do not pick up repositories created after them.
