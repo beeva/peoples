@@ -50,16 +50,40 @@ BASE_DIR = Path(__file__).resolve().parent
 # really serving it.
 DATA_DIR = Path(os.environ.get("MYSQL_DATADIR") or (BASE_DIR / "db" / "data"))
 
+def _int_env(key: str, default: int) -> int:
+    """An integer setting, where blank counts as unset.
+
+    `os.environ.get(key, "3307")` returns the default only when the variable is
+    absent. A variable that is *present and empty* -- a `.env` line reading
+    `MYSQL_PORT=`, or a GitHub Actions secret that was never populated, which
+    the runner still exports as `""` -- returns the empty string, and int()
+    rejects it with `invalid literal for int() with base 10: ''`.
+
+    That happens at import, so the traceback names this line rather than the
+    setting that is missing, and it fires before any code that could say which
+    database it meant to reach. Falling back leaves the failure where it
+    belongs: a connection error that names the host. Blank means "use the
+    default" everywhere else in this project; it means that here too.
+    """
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 DB_HOST = os.environ.get("MYSQL_HOST", "127.0.0.1")
 # 3307 by default, not MySQL's 3306: this is the project's server, and it has to
 # be able to run beside whatever XAMPP has on the standard port.
-DB_PORT = int(os.environ.get("MYSQL_PORT", "3307"))
+DB_PORT = _int_env("MYSQL_PORT", 3307)
 DB_USER = os.environ.get("MYSQL_USER", "root")
 DB_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")
 DB_NAME = os.environ.get("MYSQL_DATABASE", "email_scrapper")
 # How long to keep retrying at startup. `npm run dev` races the database and
 # the API, so the API has to be willing to wait for mysqld to finish booting.
-CONNECT_TIMEOUT = int(os.environ.get("MYSQL_CONNECT_TIMEOUT", "60"))
+CONNECT_TIMEOUT = _int_env("MYSQL_CONNECT_TIMEOUT", 60)
 
 _LOCAL = threading.local()
 _BOOTSTRAP_LOCK = threading.Lock()
@@ -210,7 +234,7 @@ def execute_script(statements) -> None:
 # XAMPP ships max_allowed_packet=1M, which a multi-row INSERT of profile bios
 # will exceed. Chunks are sized in bytes rather than rows so one unusually
 # long record cannot blow the limit on its own.
-MAX_CHUNK_BYTES = int(os.environ.get("MYSQL_CHUNK_BYTES", "524288"))
+MAX_CHUNK_BYTES = _int_env("MYSQL_CHUNK_BYTES", 524288)
 
 
 def insert_chunked(sql: str, rows, chunk_bytes: int = MAX_CHUNK_BYTES) -> int:

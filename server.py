@@ -125,7 +125,10 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+# _to_int rather than int(): a blank SMTP_PORT is present-but-empty, and int()
+# raises on it at import time -- taking the whole API down over a setting that
+# only matters when sending mail.
+SMTP_PORT = _to_int(os.environ.get("SMTP_PORT", ""), 587)
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 MAIL_FROM = os.environ.get("MAIL_FROM", SMTP_USER)
@@ -138,7 +141,7 @@ MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "Ephrem")
 # that get viewed.
 ENRICH_ENABLED = bool(ANTHROPIC_API_KEY) and \
     os.environ.get("ENRICH", "1").lower() not in ("0", "false", "no")
-ENRICH_WORKERS = max(1, int(os.environ.get("ENRICH_WORKERS", "3")))
+ENRICH_WORKERS = max(1, _to_int(os.environ.get("ENRICH_WORKERS", ""), 3))
 ENRICH_LOCK = threading.Lock()
 ENRICH_QUEUE: deque = deque()
 ENRICH_SEEN: set = set()     # emails queued this run (avoid re-enqueue)
