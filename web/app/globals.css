@@ -1911,6 +1911,13 @@ mark {
 .btn-secondary:hover {
   border-color: var(--accent);
 }
+/* Armed state of a two-step confirm: the next click is the destructive one,
+   so the button stops looking like the quiet option beside Cancel. */
+.btn-secondary.is-confirming {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, var(--surface-2));
+}
 .msg-status {
   font-size: 12.5px;
   min-height: 16px;

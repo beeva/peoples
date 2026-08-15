@@ -104,6 +104,10 @@ export default function ExportButton({
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [marking, setMarking] = useState(false);
+  // Arms the "mark as sent" button. The first click asks, the second acts --
+  // window.confirm() is suppressible ("prevent additional dialogs"), and when
+  // it is suppressed it returns false, so the button silently did nothing.
+  const [confirmMark, setConfirmMark] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState<ExportData | null>(null);
 
@@ -130,6 +134,12 @@ export default function ExportButton({
     setError("");
     setOpen(true);
   }
+
+  // Never leave the button armed across a change of what it would act on:
+  // closing the dialog or a fresh preview both disarm it.
+  useEffect(() => {
+    setConfirmMark(false);
+  }, [open, data]);
 
   // Re-fetch the preview whenever the dialog is open and any condition
   // changes (debounced so typing a count doesn't fire per keystroke).
@@ -236,7 +246,11 @@ export default function ExportButton({
   async function markAllSent() {
     const rows = data?.items ?? [];
     if (!rows.length || marking) return;
-    if (!window.confirm(`Mark ${rows.length} contacts as sent?`)) return;
+    if (!confirmMark) {
+      setConfirmMark(true); // first click arms; the label asks for confirmation
+      return;
+    }
+    setConfirmMark(false);
     setMarking(true);
     setError("");
     try {
@@ -576,12 +590,16 @@ export default function ExportButton({
                 Cancel
               </button>
               <button
-                className="btn-secondary"
+                className={`btn-secondary${confirmMark ? " is-confirming" : ""}`}
                 onClick={markAllSent}
                 disabled={marking || loading || rows.length === 0}
                 title="Flag every contact in the preview as sent (same as ticking each row's Sent box)"
               >
-                {marking ? "Marking…" : `✓ Mark ${rows.length.toLocaleString()} as sent`}
+                {marking
+                  ? "Marking…"
+                  : confirmMark
+                    ? `Click again to mark ${rows.length.toLocaleString()}`
+                    : `✓ Mark ${rows.length.toLocaleString()} as sent`}
               </button>
               <button
                 className="btn-primary"
