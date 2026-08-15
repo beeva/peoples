@@ -845,8 +845,12 @@ a:hover {
 .spin-mini {
   position: absolute;
   right: 14px;
+  /* Centred with a negative margin, not translateY(-50%): `spin` animates
+     `transform`, so a static transform here would be overwritten for the
+     whole cycle and the spinner would slide down the input as it turned.
+     Keep this in step with the 16px height below. */
   top: 50%;
-  transform: translateY(-50%);
+  margin-top: -8px;
   width: 16px;
   height: 16px;
   border-radius: 50%;
