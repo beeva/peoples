@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 
-DEFAULT_UA = "email-scrapper (polite; standard-library scraper)"
+DEFAULT_UA = "peoples (polite; standard-library scraper)"
 
 
 def fetch(

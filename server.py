@@ -431,7 +431,7 @@ def _gh(path: str, method: str = "GET", body: dict | None = None) -> tuple:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
             "Content-Type": "application/json",
-            "User-Agent": "email-scrapper",
+            "User-Agent": "peoples",
         },
         method=method,
     )
@@ -1244,7 +1244,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if route in ("/", "/index.html"):
             self._send_json({
-                "service": "email-scrapper data API",
+                "service": "peoples data API",
                 "storage": f"mysql://{db.DB_HOST}:{db.DB_PORT}/{db.DB_NAME}",
                 "ui": "Run the Next.js app in web/ (npm run dev); it consumes this API.",
                 "endpoints": [

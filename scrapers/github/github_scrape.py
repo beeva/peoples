@@ -88,7 +88,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from regions import ALL_REGIONS, REGIONS, classify, search_terms  # noqa: E402
 
 API = "https://api.github.com"
-UA = "email-scrapper (polite; github profile scraper)"
+UA = "peoples (polite; github profile scraper)"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 load_env()

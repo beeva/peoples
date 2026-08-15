@@ -300,14 +300,14 @@ This is the one that makes the **Rescrape** button work after deployment. It is
 a *different, more privileged* token from §7 — keep them separate so the
 read-only scraping token stays read-only.
 
-`GH_REPO` is just `beeva/email-scrapper` — owner/name, no URL.
+`GH_REPO` is just `beeva/peoples` — owner/name, no URL.
 
 For the token, use a **fine-grained** PAT so it can touch this repository only:
 
 1. **[github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new)**
 2. **Token name:** `email-scrapper-dispatch`. **Expiration:** 90 days.
 3. **Resource owner:** `beeva`.
-4. **Repository access → Only select repositories → `email-scrapper`.**
+4. **Repository access → Only select repositories → `peoples`.**
    Do not pick "All repositories".
 5. **Repository permissions → Actions → Read and write.**
    (Metadata → Read-only is added automatically and is required.)
@@ -323,7 +323,7 @@ Never Vercel, never a repo secret.
 curl -s -o /dev/null -w '%{http_code}\n' -X POST \
   -H "Authorization: Bearer $GH_DISPATCH_TOKEN" \
   -H "Accept: application/vnd.github+json" \
-  https://api.github.com/repos/beeva/email-scrapper/actions/workflows/scrape.yml/dispatches \
+  https://api.github.com/repos/beeva/peoples/actions/workflows/scrape.yml/dispatches \
   -d '{"ref":"main","inputs":{"source":"phones","args":"--limit 5"}}'
 ```
 
@@ -375,7 +375,7 @@ way to find the one you got wrong:
 Loaded 12794 contacts (discourse=589, aboutme=410, github=11795)     ← the data arrived
 Messaging: generate=on, send=on, from=you@gmail.com                  ← ANTHROPIC_API_KEY, SMTP_PASSWORD
 Enrichment: on (2059 cached, 2 workers)                              ← ENRICH
-Scrapes run in: GitHub Actions (beeva/email-scrapper)                ← GH_REPO + GH_DISPATCH_TOKEN
+Scrapes run in: GitHub Actions (beeva/peoples)                ← GH_REPO + GH_DISPATCH_TOKEN
 Auth: on (X-Api-Token)                                               ← API_TOKEN
 Serving on http://0.0.0.0:7860
 ```

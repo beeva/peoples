@@ -1,4 +1,4 @@
-# email-scrapper
+# peoples
 
 A small monorepo for **scraping public contact emails** from a few sources and
 **browsing** the three.js results through a polished UI.

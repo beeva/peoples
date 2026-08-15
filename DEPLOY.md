@@ -430,7 +430,7 @@ while bound to `0.0.0.0` prints a loud warning; do not ignore it.
 
 ## Step 4 — The frontend
 
-1. [vercel.com/new](https://vercel.com/new) → import `beeva/email-scrapper`.
+1. [vercel.com/new](https://vercel.com/new) → import `beeva/peoples`.
 2. **Root Directory: `web`.** Vercel detects Next.js and uses `npm run build`.
 3. **Environment Variables**, Production *and* Preview:
 
@@ -523,7 +523,7 @@ With two more variables on the API host, `POST /api/scrape` dispatches
 same button, same filter targeting, same live-updating list.
 
 ```
-GH_REPO=beeva/email-scrapper
+GH_REPO=beeva/peoples
 GH_DISPATCH_TOKEN=github_pat_...
 ```
 
@@ -543,7 +543,7 @@ What happens then:
 - **Stop** — the Stop button cancels the run. In the few seconds before GitHub
   has created it, stopping says so rather than pretending.
 - **The banner** confirms which mode you are in:
-  `Scrapes run in: GitHub Actions (beeva/email-scrapper)`.
+  `Scrapes run in: GitHub Actions (beeva/peoples)`.
 
 Leave both unset and scrapes run in-process exactly as they always have — which
 is what you want locally.

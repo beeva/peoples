@@ -132,7 +132,7 @@ budget everything below has to fit inside, and one page gets close to it — see
 
 ## Step 1 — Deploy the API
 
-1. [vercel.com/new](https://vercel.com/new) → **Import** `beeva/email-scrapper`.
+1. [vercel.com/new](https://vercel.com/new) → **Import** `beeva/peoples`.
    (Approve Vercel's access to the private repo when GitHub asks.)
 2. **Root Directory: `.`** — the repository root. Leave the framework preset
    as-is; `vercel.json` sets it to none.
@@ -155,7 +155,7 @@ budget everything below has to fit inside, and one page gets close to it — see
 | `SMTP_PASSWORD` | `.env` — the 16-character app password |
 | `MAIL_FROM` | same as `SMTP_USER` |
 | `MAIL_FROM_NAME` | `Ephrem` |
-| `GH_REPO` | `beeva/email-scrapper` |
+| `GH_REPO` | `beeva/peoples` |
 | `GH_DISPATCH_TOKEN` | `.env` — the `github_pat_…` token |
 | `ENRICH` | **`0`** — see [§2](#2-what-you-are-accepting) |
 
@@ -328,7 +328,7 @@ do not pick up repositories created after them.
 
 1. [github.com/settings/personal-access-tokens](https://github.com/settings/personal-access-tokens)
    → open the token.
-2. **Repository access → Only select repositories → add `email-scrapper`.**
+2. **Repository access → Only select repositories → add `peoples`.**
 3. Confirm **Repository permissions → Actions → Read and write**.
 4. **Update token** — the string does not change, so nothing else needs editing.
 
@@ -373,7 +373,7 @@ and `200`. In the browser:
 - [ ] Message generation returns text — proves `ANTHROPIC_API_KEY` arrived.
 - [ ] Send a message **to yourself** — proves SMTP and the sent-log write.
 - [ ] **Rescrape** with a small limit → a run appears at
-      `github.com/beeva/email-scrapper/actions`.
+      `github.com/beeva/peoples/actions`.
 
 ---
 
