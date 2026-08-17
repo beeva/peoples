@@ -134,6 +134,7 @@ POST /api/scrape?source=discourse|devto|aboutme|github[&pages=&limit=&regions=&f
 POST /api/scrape/stop?source=...                                         # stop a running job
 GET  /api/scrape/status?source=...                                       # poll a job (live added count)
 POST /api/runs/merge   {"source":"github","from":[5],"into":3}           # fold one step into another
+POST /api/contacts/delete  {"ids":["..."]}  or  {"id":"..."}            # delete contacts, for good (see below)
 
 GET  /api/db/status                          # server, size, table counts, sync state, dumps
 GET  /api/db/export[?download=1&file=path]   # dump the database to .sql
@@ -263,6 +264,25 @@ Only the step label changes; no contact is added, removed or altered — it is a
 `UPDATE` of the `run` column, not a rewrite of the archive. Merging is refused
 while a scrape of that source is running, since that run is still handing out
 its own step number.
+
+### Deleting contacts
+
+Every row has a **delete** button next to its "view details" one, and each row
+has a tick box: tick some (or the header box, for the whole page) and a bar
+above the table offers **Delete selected**. Both ask before they act — the row
+button arms on the first click and deletes on the second, the bar shows a
+confirm step with the count.
+
+A deletion is permanent, and deliberately thorough. `contacts` is a
+materialised view of `records`, so deleting the merged row alone would last
+only until the next rebuild; the records behind it go too. Their scraper ids
+are then written to the `skipped` table — the same one a scrape writes when it
+rules someone out — so the next run over the same ground does not simply
+collect them again. Nothing here is undoable short of restoring a dump, which
+is what `npm run db:export` is for.
+
+A selection only ever covers the rows on screen: changing page, filter or sort
+clears it, so "delete selected" can never remove someone you cannot see.
 
 ## The database
 

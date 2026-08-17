@@ -1260,6 +1260,106 @@ select.sort:hover {
   width: 16px;
   height: 16px;
 }
+/* Delete. A <button> rather than a link, so it needs the box reset the UA
+   padding would otherwise skew (same reasoning as .icon-btn above). */
+button.icon-link {
+  padding: 0;
+  line-height: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.icon-link.danger:hover {
+  color: var(--error);
+  border-color: var(--error);
+}
+/* Armed: one click has been given, the next one deletes. Loud on purpose. */
+.icon-link.danger.armed,
+.icon-link.danger.armed:hover {
+  color: var(--error);
+  border-color: var(--error);
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  transform: none;
+}
+.icon-link:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+/* ---------- Selected rows ---------- */
+/* Sits between the result count and the table, and only exists while
+   something is ticked. */
+.selection-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+.selection-count {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.selection-count b {
+  color: var(--text);
+  font-weight: 700;
+}
+.selection-warn {
+  flex: 1;
+  min-width: 240px;
+  font-size: 12px;
+  color: var(--warn);
+}
+.selection-go {
+  margin-left: auto;
+  padding: 7px 14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.selection-go:hover {
+  filter: brightness(1.08);
+}
+.selection-go.danger {
+  border-color: var(--error);
+  background: var(--error);
+  color: #fff;
+}
+.selection-go:disabled {
+  opacity: 0.55;
+  cursor: default;
+  filter: none;
+}
+/* "Clear", "Cancel", "select all on this page" -- present but not competing
+   with the action next to them. */
+.selection-quiet {
+  padding: 7px 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.16s, color 0.16s;
+}
+.selection-quiet:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.selection-quiet:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
 .contact-table .muted {
   color: var(--text-faint);
 }
@@ -1360,6 +1460,26 @@ select.sort:hover {
   width: 1%;
   padding-right: 0;
   text-align: center;
+}
+/* Row selection — the leading column, and the header box that ticks the page.
+   Kept visually quieter than the green "sent" box next to it: this one picks
+   rows for an action rather than recording anything about the person. */
+.contact-table .col-select {
+  width: 1%;
+  padding-right: 0;
+  text-align: center;
+}
+.row-select {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.row-select input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
 }
 .sent-toggle {
   display: inline-flex;

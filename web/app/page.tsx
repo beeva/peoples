@@ -17,6 +17,8 @@ import StatusFilter from "@/components/StatusFilter";
 import FacetFilters from "@/components/FacetFilters";
 import RescrapeButton from "@/components/RescrapeButton";
 import ExportButton from "@/components/ExportButton";
+import { SelectionProvider } from "@/components/Selection";
+import SelectionBar from "@/components/SelectionBar";
 import ThemeToggle from "@/components/ThemeToggle";
 import Toaster from "@/components/Toaster";
 
@@ -189,13 +191,18 @@ export default async function Home({
         </div>
 
         {result.items.length > 0 ? (
-          <EmailTable
-            items={result.items}
-            query={q}
-            startIndex={(result.page - 1) * result.perPage}
-            sort={sort}
-            baseParams={baseParams}
-          />
+          // The table is a server component; only the tick boxes and the bar
+          // that acts on them run in the browser.
+          <SelectionProvider ids={result.items.map((item) => item.id)}>
+            <SelectionBar />
+            <EmailTable
+              items={result.items}
+              query={q}
+              startIndex={(result.page - 1) * result.perPage}
+              sort={sort}
+              baseParams={baseParams}
+            />
+          </SelectionProvider>
         ) : (
           <div className="empty">
             <svg

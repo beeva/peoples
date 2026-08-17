@@ -564,6 +564,54 @@ def relabel_runs(source: str, from_runs: set, into: int) -> int:
     return moved
 
 
+def delete_contacts(ids, remember: bool = True) -> dict:
+    """Delete contacts, the records they were merged from, and remember them.
+
+    ``contacts`` is a materialised view of ``records`` (see ``rebuild_contacts``
+    above), so deleting only the merged row would last exactly until the next
+    rebuild brought the person straight back. The records they merged from have
+    to go with them.
+
+    That still leaves the scraper, which would collect the same people on its
+    next run over the same ground. Their scraper ids therefore go into
+    ``skipped`` -- the same table a scrape writes when it rules someone out --
+    so a deletion holds. Pass ``remember=False`` to delete without that, for a
+    contact you would want back if they were scraped again.
+
+    Returns what it removed. Ids that match nothing are simply not counted:
+    deleting an already-deleted contact is not an error.
+    """
+    wanted = [i for i in dict.fromkeys(str(x).strip() for x in ids) if i]
+    if not wanted:
+        return {"contacts": 0, "records": 0, "blocked": 0}
+    marks = ", ".join(["%s"] * len(wanted))
+    # Both branches of the OR are indexed (PRIMARY, idx_records_contact).
+    # `contact_id` is what the merge sets on every member; `id` catches the
+    # representative record of a contact written before that column existed.
+    member_sql = f"FROM records WHERE contact_id IN ({marks}) OR id IN ({marks})"
+    member_args = wanted + wanted
+
+    with db.transaction():
+        blocked = 0
+        if remember:
+            members = db.query(f"SELECT source, local_id {member_sql}", member_args)
+            blocked = db.insert_chunked(
+                "INSERT IGNORE INTO skipped (source, local_id, reason) "
+                "VALUES (%s, %s, %s)",
+                ((m["source"], m["local_id"], "deleted")
+                 for m in members if m["local_id"]))
+        # Children first: nothing enforces these as foreign keys, so an
+        # interrupted delete would otherwise leave rows pointing at no contact.
+        db.execute(f"DELETE FROM contact_phones WHERE contact_id IN ({marks})",
+                   wanted)
+        db.execute(f"DELETE FROM contact_emails WHERE contact_id IN ({marks})",
+                   wanted)
+        contacts = db.execute(f"DELETE FROM contacts WHERE id IN ({marks})", wanted)
+        records = db.execute(f"DELETE {member_sql}", member_args)
+
+    return {"contacts": contacts, "records": records, "blocked": blocked}
+
+
 def runs_present(source: str) -> set:
     return {int(r["run"]) for r in db.query(
         "SELECT DISTINCT run FROM records WHERE source = %s", (source,))}

@@ -10,7 +10,9 @@ import {
   sentLabel,
 } from "@/lib/display";
 import CopyButton from "./CopyButton";
+import DeleteButton from "./DeleteButton";
 import MessageButton from "./MessageButton";
+import { RowSelect, SelectAll } from "./Selection";
 import SentToggle from "./SentToggle";
 import VisitedLink from "./VisitedLink";
 
@@ -79,6 +81,10 @@ function Row({
 
   return (
     <tr className={record.messaged ? "messaged" : undefined}>
+      <td className="col-select">
+        <RowSelect id={record.id} name={display} />
+      </td>
+
       <td className="col-num">{num}</td>
 
       <td className="col-run">
@@ -259,6 +265,7 @@ function Row({
               <circle cx="12" cy="12" r="3" />
             </svg>
           </Link>
+          <DeleteButton id={record.id} name={display} />
         </div>
       </td>
     </tr>
@@ -332,6 +339,9 @@ export default function EmailTable({
       <table className="contact-table">
         <thead>
           <tr>
+            <th className="col-select">
+              <SelectAll />
+            </th>
             <th className="col-num">#</th>
             <SortHeader
               className="col-run"

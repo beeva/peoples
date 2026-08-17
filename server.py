@@ -105,6 +105,11 @@ API_TOKEN = os.environ.get("API_TOKEN", "")
 # loopback here, or documenting the setting would quietly publish the API.
 BIND_HOST = os.environ.get("HOST", "").strip() or "127.0.0.1"
 
+# Ceiling on one /api/contacts/delete call. The UI can only select what is on
+# the page, so this is well clear of anything it asks for; it is here so a
+# hand-made request cannot empty the archive in a single line.
+MAX_DELETE = 500
+
 # ---- scrapes on GitHub Actions --------------------------------------------
 # A scrape runs for hours. That is fine as a subprocess of a server on a
 # machine that stays up, and impossible on a managed host that may be restarted
@@ -1159,6 +1164,21 @@ def _mark_sent_many(ids: list[str], sent: bool) -> int:
     return len(email_lists)
 
 
+def delete_contacts(ids: list[str], remember: bool = True) -> dict:
+    """Delete contacts by id, from the UI's row and bulk delete buttons.
+
+    The work is dbsync's -- contacts, the records behind them, and a note in
+    `skipped` so the next scrape does not collect the same people again. This
+    adds what the API owes the caller around it: the caches every list, facet
+    and stat is served from have to be dropped, since all of them counted the
+    people that just went.
+    """
+    result = dbsync.delete_contacts(ids, remember=remember)
+    if result["contacts"] or result["records"]:
+        dbquery.invalidate_caches()
+    return result
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ContactDirectory/4.0"
 
@@ -1252,6 +1272,7 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/scrape", "/api/scrape/status", "/api/scrape/stop",
                     "/api/message/generate", "/api/message/send",
                     "/api/message/mark", "/api/runs/merge",
+                    "/api/contacts/delete",
                     "/api/slack/workspaces", "/api/slack/users?ws=",
                     "/api/db/status", "/api/db/export", "/api/db/import",
                     "/api/db/import-files",
@@ -1427,6 +1448,30 @@ class Handler(BaseHTTPRequestHandler):
                                  "address -- the sent log is keyed by address"}, 409)
             else:
                 self._send_json({"ok": True, **view})
+            return
+
+        if parsed.path == "/api/contacts/delete":
+            data = self._read_json_body()
+            # Both the row button ({"id": ...}) and the "delete selected" bar
+            # ({"ids": [...]}) come here; one id is just a list of one.
+            raw = data.get("ids")
+            if not isinstance(raw, list):
+                raw = [data.get("id")]
+            ids = [str(i) for i in raw if i]
+            if not ids:
+                self._send_json({"ok": False, "error": "no contact ids given"}, 400)
+                return
+            if len(ids) > MAX_DELETE:
+                self._send_json({"ok": False, "error":
+                                 f"too many at once (limit {MAX_DELETE})"}, 413)
+                return
+            result = delete_contacts(ids, data.get("remember", True) is not False)
+            if not result["contacts"] and not result["records"]:
+                self._send_json({"ok": False,
+                                 "error": "no such contact -- already deleted?"},
+                                404)
+                return
+            self._send_json({"ok": True, **result})
             return
 
         if parsed.path == "/api/message/send":
