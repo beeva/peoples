@@ -529,6 +529,41 @@ a:hover {
   color: var(--accent);
   flex: none;
 }
+/* The title doubles as the panel's open/shut control. */
+.facet-toggle {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 680;
+  cursor: pointer;
+}
+.facet-toggle:hover .facet-chevron {
+  color: var(--text);
+}
+.facet-chevron {
+  width: 15px;
+  height: 15px;
+  margin-left: 1px;
+  color: var(--text-dim);
+  transition: transform 0.18s ease, color 0.16s;
+}
+.facet-toggle[aria-expanded="true"] .facet-chevron {
+  transform: rotate(180deg);
+}
+/* Shut: the header is the whole panel, so it carries no dividing rule. */
+.facet-filters.shut {
+  margin-bottom: 16px;
+  padding: 12px 18px;
+}
+.facet-filters.shut .facet-head {
+  padding-bottom: 0;
+  border-bottom: none;
+}
 /* "3" — how many conditions are currently on. */
 .facet-active-n {
   font-size: 10.5px;
@@ -687,15 +722,15 @@ a:hover {
   font-size: 12.5px;
   color: var(--text-dim);
 }
-/* Countries can be many; keep them in a bounded, scrollable strip that
-   spans the full row under the search box. */
-.facet-country-scroll {
+/* Countries can be many, and they are all shown: the list wraps over as many
+   lines as it needs under the search box rather than scrolling inside a
+   bounded strip, so no country is hidden behind a scrollbar. The panel it
+   lives in collapses, which is what keeps the page manageable. */
+.facet-country-list {
   flex-basis: 100%;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  max-height: 118px;
-  overflow-y: auto;
   padding: 2px;
 }
 .facet-countries .check-pill {

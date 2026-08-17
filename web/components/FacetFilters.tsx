@@ -26,6 +26,10 @@ const AGE_OPS: { key: Exclude<AgeOp, "">; label: string }[] = [
   { key: "less", label: "Less than" },
 ];
 
+/** Remembers whether the panel was left open, so the choice survives a reload
+ *  and a move between the contact and database pages. */
+const OPEN_KEY = "facets:open";
+
 /** Country / gender / step / account-age filters for the contact table.
  *
  *  The whole panel writes to the URL, so a filtered view is shareable and the
@@ -33,8 +37,11 @@ const AGE_OPS: { key: Exclude<AgeOp, "">; label: string }[] = [
  *  matches (the facet count), computed over the current source + search.
  *
  *  Layout is one labelled row per condition so every group gets the full
- *  width -- the country list wraps and scrolls in place instead of being
- *  squeezed into a side column, and a search box narrows it.
+ *  width -- the country list wraps over as many lines as it needs instead of
+ *  being squeezed into a side column, and a search box narrows it. Every row
+ *  together is taller than the table it filters, so the panel collapses to its
+ *  header; the count beside the title says how many conditions are on while it
+ *  is shut.
  */
 export default function FacetFilters({
   filter,
@@ -77,6 +84,31 @@ export default function FacetFilters({
     setActiveOp(filter.activeOp);
     setActiveDate(filter.activeDate);
   }, [filter.joinedOp, filter.joinedDate, filter.activeOp, filter.activeDate]);
+
+  // Open by default only when something is already filtered -- a shared
+  // filtered link should show what it is filtering by. The stored preference,
+  // read after mount so the server and first client render agree, wins over
+  // that once the user has expressed one.
+  const [open, setOpen] = useState(() => hasActiveFilter(filter));
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(OPEN_KEY);
+      if (saved !== null) setOpen(saved === "1");
+    } catch {
+      // Private mode / blocked storage: the default above is fine.
+    }
+  }, []);
+
+  function toggleOpen() {
+    setOpen((wasOpen) => {
+      try {
+        window.localStorage.setItem(OPEN_KEY, wasOpen ? "0" : "1");
+      } catch {
+        // Not being able to remember it doesn't stop it from opening.
+      }
+      return !wasOpen;
+    });
+  }
 
   // Country search narrows the (long) list; selected stay visible so a
   // choice can always be un-made.
@@ -179,17 +211,28 @@ export default function FacetFilters({
     (dateActive(filter.activeOp, filter.activeDate) ? 1 : 0);
 
   return (
-    <div className="facet-filters">
+    <div className={`facet-filters${open ? "" : " shut"}`}>
       <div className="facet-head">
-        <span className="facet-title">
+        <button
+          className="facet-title facet-toggle"
+          type="button"
+          onClick={toggleOpen}
+          aria-expanded={open}
+        >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
                strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
           </svg>
           Filters
           {activeCount > 0 && <span className="facet-active-n">{activeCount}</span>}
-        </span>
-        {showAge && (
+          {/* Chevron, pointing down when shut and up when open. */}
+          <svg className="facet-chevron" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"
+               strokeLinejoin="round" aria-hidden="true">
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
+        {showAge && open && (
           <span className="facet-hint" role="note">
             Filters both the list below <strong>and</strong> what <em>Rescrape</em>{" "}
             goes and collects.
@@ -202,231 +245,235 @@ export default function FacetFilters({
         )}
       </div>
 
-      {showAge && (
-        <div className="facet-row">
-          <span className="facet-label">Account age</span>
-          {/* Age + joined + last-active share one line: three small
-              comparison controls don't each deserve a full row. */}
-          <div className="facet-controls">
-            <select
-              className="facet-op"
-              value={ageOp}
-              onChange={(e) => {
-                const op = e.target.value as AgeOp;
-                setAgeOp(op);
-                commitAge(op, ageValue);
-              }}
-              aria-label="Age comparison"
-            >
-              <option value="">Any</option>
-              {AGE_OPS.map((o) => (
-                <option key={o.key} value={o.key}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-            <input
-              className="facet-age-value"
-              type="number"
-              min={0}
-              step={1}
-              inputMode="numeric"
-              placeholder="yrs"
-              value={ageValue}
-              disabled={ageOp === ""}
-              onChange={(e) => setAgeValue(e.target.value)}
-              onBlur={() => commitAge(ageOp, ageValue)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") commitAge(ageOp, ageValue);
-              }}
-              aria-label="Age in years"
-            />
-            <span className="facet-unit">years on GitHub</span>
-
-            <span className="facet-label facet-label-inline">Joined</span>
-            <select
-              className="facet-op"
-              value={joinedOp}
-              onChange={(e) => {
-                const op = e.target.value as DateOp;
-                setJoinedOp(op);
-                commitDate("joined", op, joinedDate);
-              }}
-              aria-label="Join-date comparison"
-            >
-              <option value="">Any time</option>
-              <option value="after">After</option>
-              <option value="before">Before</option>
-            </select>
-            <input
-              className="facet-date"
-              type="date"
-              value={joinedDate}
-              disabled={joinedOp === ""}
-              onChange={(e) => {
-                setJoinedDate(e.target.value);
-                commitDate("joined", joinedOp, e.target.value);
-              }}
-              aria-label="Join date"
-            />
-
-            <span className="facet-label facet-label-inline">Last active</span>
-            <select
-              className="facet-op"
-              value={activeOp}
-              onChange={(e) => {
-                const op = e.target.value as DateOp;
-                setActiveOp(op);
-                commitDate("active", op, activeDate);
-              }}
-              aria-label="Last-active comparison"
-            >
-              <option value="">Any time</option>
-              <option value="after">After</option>
-              <option value="before">Before</option>
-            </select>
-            <input
-              className="facet-date"
-              type="date"
-              value={activeDate}
-              disabled={activeOp === ""}
-              onChange={(e) => {
-                setActiveDate(e.target.value);
-                commitDate("active", activeOp, e.target.value);
-              }}
-              aria-label="Last-active date"
-            />
-          </div>
-        </div>
-      )}
-
-      <div className="facet-row">
-        <span className="facet-label">Gender</span>
-        <div className="facet-controls">
-          {GENDERS.map((g) => (
-            <label
-              key={g.key}
-              className={`check-pill${filter.genders.includes(g.key) ? " on" : ""}`}
-            >
+      {open && (
+      <>
+        {showAge && (
+          <div className="facet-row">
+            <span className="facet-label">Account age</span>
+            {/* Age + joined + last-active share one line: three small
+                comparison controls don't each deserve a full row. */}
+            <div className="facet-controls">
+              <select
+                className="facet-op"
+                value={ageOp}
+                onChange={(e) => {
+                  const op = e.target.value as AgeOp;
+                  setAgeOp(op);
+                  commitAge(op, ageValue);
+                }}
+                aria-label="Age comparison"
+              >
+                <option value="">Any</option>
+                {AGE_OPS.map((o) => (
+                  <option key={o.key} value={o.key}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
               <input
-                type="checkbox"
-                checked={filter.genders.includes(g.key)}
-                onChange={() =>
-                  apply({ ...filter, genders: toggleIn(filter.genders, g.key) })
-                }
+                className="facet-age-value"
+                type="number"
+                min={0}
+                step={1}
+                inputMode="numeric"
+                placeholder="yrs"
+                value={ageValue}
+                disabled={ageOp === ""}
+                onChange={(e) => setAgeValue(e.target.value)}
+                onBlur={() => commitAge(ageOp, ageValue)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitAge(ageOp, ageValue);
+                }}
+                aria-label="Age in years"
               />
-              <span>{g.label}</span>
-              <span className="check-count">
-                {(genderCounts[g.key] ?? 0).toLocaleString()}
-              </span>
-            </label>
-          ))}
-        </div>
-      </div>
+              <span className="facet-unit">years on GitHub</span>
 
-      <div className="facet-row">
-        <span className="facet-label">Reach</span>
-        <div className="facet-controls">
-          {REACH.map((r) => (
-            <label
-              key={r.key}
-              className={`check-pill${filter.contactable.includes(r.key) ? " on" : ""}`}
-            >
+              <span className="facet-label facet-label-inline">Joined</span>
+              <select
+                className="facet-op"
+                value={joinedOp}
+                onChange={(e) => {
+                  const op = e.target.value as DateOp;
+                  setJoinedOp(op);
+                  commitDate("joined", op, joinedDate);
+                }}
+                aria-label="Join-date comparison"
+              >
+                <option value="">Any time</option>
+                <option value="after">After</option>
+                <option value="before">Before</option>
+              </select>
               <input
-                type="checkbox"
-                checked={filter.contactable.includes(r.key)}
-                onChange={() =>
-                  apply({
-                    ...filter,
-                    contactable: toggleIn(filter.contactable, r.key),
-                  })
-                }
+                className="facet-date"
+                type="date"
+                value={joinedDate}
+                disabled={joinedOp === ""}
+                onChange={(e) => {
+                  setJoinedDate(e.target.value);
+                  commitDate("joined", joinedOp, e.target.value);
+                }}
+                aria-label="Join date"
               />
-              <span>{r.label}</span>
-              <span className="check-count">
-                {(facets.contactable?.[r.key] ?? 0).toLocaleString()}
-              </span>
-            </label>
-          ))}
-        </div>
-      </div>
 
-      {facets.runs.length > 0 && (
-        <div className="facet-row">
-          <span className="facet-label">Step</span>
-          <div className="facet-controls">
-            {facets.runs.map((r) => {
-              const key = String(r.run);
-              const on = filter.runs.includes(key);
-              return (
-                <label key={r.run} className={`check-pill${on ? " on" : ""}`}>
-                  <input
-                    type="checkbox"
-                    checked={on}
-                    onChange={() =>
-                      apply({ ...filter, runs: toggleIn(filter.runs, key) })
-                    }
-                  />
-                  <span>Run {r.run}</span>
-                  <span className="check-count">{r.count.toLocaleString()}</span>
-                </label>
-              );
-            })}
-            {mergeSource && (
-              <MergeRuns source={mergeSource} runs={facets.runs} />
-            )}
+              <span className="facet-label facet-label-inline">Last active</span>
+              <select
+                className="facet-op"
+                value={activeOp}
+                onChange={(e) => {
+                  const op = e.target.value as DateOp;
+                  setActiveOp(op);
+                  commitDate("active", op, activeDate);
+                }}
+                aria-label="Last-active comparison"
+              >
+                <option value="">Any time</option>
+                <option value="after">After</option>
+                <option value="before">Before</option>
+              </select>
+              <input
+                className="facet-date"
+                type="date"
+                value={activeDate}
+                disabled={activeOp === ""}
+                onChange={(e) => {
+                  setActiveDate(e.target.value);
+                  commitDate("active", activeOp, e.target.value);
+                }}
+                aria-label="Last-active date"
+              />
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      <div className="facet-row">
-        <span className="facet-label">
-          Country
-          {filter.countries.length > 0 && (
-            <span className="facet-active-n">{filter.countries.length}</span>
-          )}
-        </span>
-        <div className="facet-controls facet-countries">
-          <input
-            className="facet-search"
-            type="search"
-            placeholder="Search countries…"
-            value={countryQuery}
-            onChange={(e) => setCountryQuery(e.target.value)}
-            aria-label="Search countries"
-          />
-          <div className="facet-country-scroll">
-            {visibleCountries.length === 0 && (
-              <span className="facet-empty">
-                {facets.countries.length === 0
-                  ? "No countries yet"
-                  : "No match"}
-              </span>
-            )}
-            {visibleCountries.map((c) => (
+        <div className="facet-row">
+          <span className="facet-label">Gender</span>
+          <div className="facet-controls">
+            {GENDERS.map((g) => (
               <label
-                key={c.name}
-                className={`check-pill${filter.countries.includes(c.name) ? " on" : ""}`}
+                key={g.key}
+                className={`check-pill${filter.genders.includes(g.key) ? " on" : ""}`}
               >
                 <input
                   type="checkbox"
-                  checked={filter.countries.includes(c.name)}
+                  checked={filter.genders.includes(g.key)}
                   onChange={() =>
-                    apply({
-                      ...filter,
-                      countries: toggleIn(filter.countries, c.name),
-                    })
+                    apply({ ...filter, genders: toggleIn(filter.genders, g.key) })
                   }
                 />
-                <span>
-                  {flagEmoji(c.code)} {c.name}
+                <span>{g.label}</span>
+                <span className="check-count">
+                  {(genderCounts[g.key] ?? 0).toLocaleString()}
                 </span>
-                <span className="check-count">{c.count.toLocaleString()}</span>
               </label>
             ))}
           </div>
         </div>
-      </div>
+
+        <div className="facet-row">
+          <span className="facet-label">Reach</span>
+          <div className="facet-controls">
+            {REACH.map((r) => (
+              <label
+                key={r.key}
+                className={`check-pill${filter.contactable.includes(r.key) ? " on" : ""}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={filter.contactable.includes(r.key)}
+                  onChange={() =>
+                    apply({
+                      ...filter,
+                      contactable: toggleIn(filter.contactable, r.key),
+                    })
+                  }
+                />
+                <span>{r.label}</span>
+                <span className="check-count">
+                  {(facets.contactable?.[r.key] ?? 0).toLocaleString()}
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {facets.runs.length > 0 && (
+          <div className="facet-row">
+            <span className="facet-label">Step</span>
+            <div className="facet-controls">
+              {facets.runs.map((r) => {
+                const key = String(r.run);
+                const on = filter.runs.includes(key);
+                return (
+                  <label key={r.run} className={`check-pill${on ? " on" : ""}`}>
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() =>
+                        apply({ ...filter, runs: toggleIn(filter.runs, key) })
+                      }
+                    />
+                    <span>Run {r.run}</span>
+                    <span className="check-count">{r.count.toLocaleString()}</span>
+                  </label>
+                );
+              })}
+              {mergeSource && (
+                <MergeRuns source={mergeSource} runs={facets.runs} />
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="facet-row">
+          <span className="facet-label">
+            Country
+            {filter.countries.length > 0 && (
+              <span className="facet-active-n">{filter.countries.length}</span>
+            )}
+          </span>
+          <div className="facet-controls facet-countries">
+            <input
+              className="facet-search"
+              type="search"
+              placeholder="Search countries…"
+              value={countryQuery}
+              onChange={(e) => setCountryQuery(e.target.value)}
+              aria-label="Search countries"
+            />
+            <div className="facet-country-list">
+              {visibleCountries.length === 0 && (
+                <span className="facet-empty">
+                  {facets.countries.length === 0
+                    ? "No countries yet"
+                    : "No match"}
+                </span>
+              )}
+              {visibleCountries.map((c) => (
+                <label
+                  key={c.name}
+                  className={`check-pill${filter.countries.includes(c.name) ? " on" : ""}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={filter.countries.includes(c.name)}
+                    onChange={() =>
+                      apply({
+                        ...filter,
+                        countries: toggleIn(filter.countries, c.name),
+                      })
+                    }
+                  />
+                  <span>
+                    {flagEmoji(c.code)} {c.name}
+                  </span>
+                  <span className="check-count">{c.count.toLocaleString()}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+      </>
+      )}
     </div>
   );
 }
