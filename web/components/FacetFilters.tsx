@@ -131,6 +131,7 @@ export default function FacetFilters({
     set("country", next.countries.join(","));
     set("gender", next.genders.join(","));
     set("contactable", next.contactable.join(","));
+    set("provider", next.providers.join(","));
     set("runs", next.runs.join(","));
     const ageOn = next.ageOp !== "" && next.ageValue.trim() !== "";
     set("age_op", ageOn ? next.ageOp : "");
@@ -190,6 +191,7 @@ export default function FacetFilters({
       genders: [],
       runs: [],
       contactable: [],
+      providers: [],
       ageOp: "",
       ageValue: "",
       joinedOp: "",
@@ -205,6 +207,7 @@ export default function FacetFilters({
     filter.countries.length +
     filter.genders.length +
     filter.contactable.length +
+    filter.providers.length +
     filter.runs.length +
     (filter.ageOp && filter.ageValue ? 1 : 0) +
     (dateActive(filter.joinedOp, filter.joinedDate) ? 1 : 0) +
@@ -368,6 +371,34 @@ export default function FacetFilters({
             ))}
           </div>
         </div>
+
+        {facets.providers.length > 0 && (
+          <div className="facet-row">
+            <span className="facet-label">Email</span>
+            <div className="facet-controls">
+              {facets.providers.map((p) => (
+                <label
+                  key={p.key}
+                  className={`check-pill${filter.providers.includes(p.key) ? " on" : ""}`}
+                  title={`Contacts whose main email is a ${p.label} address`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={filter.providers.includes(p.key)}
+                    onChange={() =>
+                      apply({
+                        ...filter,
+                        providers: toggleIn(filter.providers, p.key),
+                      })
+                    }
+                  />
+                  <span>{p.label}</span>
+                  <span className="check-count">{p.count.toLocaleString()}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="facet-row">
           <span className="facet-label">Reach</span>

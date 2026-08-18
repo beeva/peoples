@@ -74,6 +74,7 @@ export default async function Home({
   if (filter.genders.length) baseParams.gender = filter.genders.join(",");
   if (filter.contactable.length)
     baseParams.contactable = filter.contactable.join(",");
+  if (filter.providers.length) baseParams.provider = filter.providers.join(",");
   // Use the runs the server actually applied, not the raw URL value: a step that
   // was merged away is dropped, so links don't re-add a phantom `runs=` filter.
   if (result.filter.runs.length) baseParams.runs = result.filter.runs.join(",");

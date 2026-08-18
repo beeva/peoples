@@ -52,6 +52,7 @@ export default function RescrapeButton({
   const scrapeFilter = parseFilter({
     country: searchParams.get("country") ?? undefined,
     gender: searchParams.get("gender") ?? undefined,
+    provider: searchParams.get("provider") ?? undefined,
     age_op: searchParams.get("age_op") ?? undefined,
     age: searchParams.get("age") ?? undefined,
     joined_op: searchParams.get("joined_op") ?? undefined,
@@ -62,6 +63,8 @@ export default function RescrapeButton({
   const scopeBits: string[] = [];
   if (scrapeFilter.countries.length) scopeBits.push(scrapeFilter.countries.join(", "));
   if (scrapeFilter.genders.length) scopeBits.push(scrapeFilter.genders.join(" / "));
+  if (scrapeFilter.providers.length)
+    scopeBits.push(scrapeFilter.providers.join(" / ") + " email");
   if (scrapeFilter.ageOp && scrapeFilter.ageValue) {
     const word =
       scrapeFilter.ageOp === "over"
@@ -154,6 +157,7 @@ export default function RescrapeButton({
         const f = parseFilter({
           country: searchParams.get("country") ?? undefined,
           gender: searchParams.get("gender") ?? undefined,
+          provider: searchParams.get("provider") ?? undefined,
           age_op: searchParams.get("age_op") ?? undefined,
           age: searchParams.get("age") ?? undefined,
           joined_op: searchParams.get("joined_op") ?? undefined,
@@ -163,6 +167,7 @@ export default function RescrapeButton({
         });
         if (f.countries.length) qs.set("country", f.countries.join(","));
         if (f.genders.length) qs.set("gender", f.genders.join(","));
+        if (f.providers.length) qs.set("provider", f.providers.join(","));
         const { min, max } = ageToRange(f);
         if (min) qs.set("age_min", min);
         if (max) qs.set("age_max", max);
@@ -267,7 +272,7 @@ export default function RescrapeButton({
       {supportsTarget && scopeText && !running && (
         <span
           className="scrape-scope"
-          title="The Country / Gender / Age filters above set what this scrape targets. Clear them to scrape everything."
+          title="The Country / Gender / Age / Email filters above set what this scrape targets. Clear them to scrape everything."
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
                strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

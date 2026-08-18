@@ -265,6 +265,13 @@ def _scrape_argv(key: str, params: dict) -> list[str]:
         genders = [g for g in gender.split(",") if g in ("male", "female")]
         if len(genders) == 1:
             argv += ["--gender", genders[0]]
+        # Mailbox buckets (gmail / outlook / ... / company): multi-select, and
+        # the scraper takes the whole list -- it reads the bucket off the
+        # address it already found, so any number of them costs nothing.
+        providers = ",".join(sorted(dbquery.parse_providers(
+            str(params.get("provider", "")))))
+        if providers:
+            argv += ["--providers", providers]
         # Joined / last-active calendar windows: the UI sends an op + a date;
         # the scraper takes them as --<field>-after / --<field>-before.
         for field in ("joined", "active"):
@@ -1306,6 +1313,7 @@ class Handler(BaseHTTPRequestHandler):
                 active_op=params.get("active_op", [""])[0],
                 active_date=params.get("active_date", [""])[0],
                 contactable=params.get("contactable", [""])[0],
+                provider=params.get("provider", [""])[0],
                 on_page=_enqueue_rows,
             ))
             return
@@ -1510,7 +1518,8 @@ class Handler(BaseHTTPRequestHandler):
             scrape_params = {}
             for k in ("pages", "limit", "regions", "target",
                       "country", "gender", "age_min", "age_max",
-                      "joined_op", "joined_date", "active_op", "active_date"):
+                      "joined_op", "joined_date", "active_op", "active_date",
+                      "provider"):
                 if k in params:
                     scrape_params[k] = params[k][0]
             if params.get("full", ["0"])[0] in ("1", "true", "yes"):

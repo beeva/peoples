@@ -76,6 +76,8 @@ from pathlib import Path
 # Make the shared `common` package importable when run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import (  # noqa: E402
+    EMAIL_PROVIDERS,
+    email_provider,
     email_rank,
     extract_emails,
     fetch,
@@ -112,8 +114,8 @@ SEARCH_PAGE_CAP = 10          # 10 pages x 100 = the API's hard 1000-result cap
 COMMIT_REPOS = 3              # newest non-fork repos to check for a commit email
 
 # Rejection reasons stable enough to persist to the skip list. The fine-grained
-# filters (country/age/gender) are left out on purpose: they change run to run,
-# so a "no" under one run's flags must not hide the person from the next.
+# filters (country/age/gender/provider) are left out on purpose: they change run
+# to run, so a "no" under one run's flags must not hide the person from the next.
 PERSISTED_SKIP_REASONS = {"not-a-user", "no-contact", "off-region"}
 
 # How hard --shuffle leans on each region. The Americas are the focus, so their
@@ -496,7 +498,7 @@ def infer_gender(name: str, location: str = "", bio: str = "") -> str:
 def scrape_user(login: str, *, regions, site_delay: float,
                 use_commits: bool = True, use_site: bool = True,
                 use_readme: bool = True, countries=None,
-                age_min=None, age_max=None, genders=None,
+                age_min=None, age_max=None, genders=None, providers=None,
                 joined_after=None, joined_before=None,
                 active_after=None, active_before=None,
                 ) -> tuple[dict | None, str]:
@@ -504,16 +506,17 @@ def scrape_user(login: str, *, regions, site_delay: float,
 
     Returns (record, "") for a keeper, or (None, reason) for someone we do not
     want -- "not-a-user" (an org), "off-region", "off-country", "off-age",
-    "off-joined", "off-activity", "no-contact", "off-gender". The reason is what
-    the caller writes to the skip list, and it is only ever a *settled*
-    verdict: a rate limit or a network blip raises instead, so a user is never
-    written off for a reason that might not be true tomorrow.
+    "off-joined", "off-activity", "no-contact", "off-provider", "off-gender".
+    The reason is what the caller writes to the skip list, and it is only ever a
+    *settled* verdict: a rate limit or a network blip raises instead, so a user
+    is never written off for a reason that might not be true tomorrow.
 
     The filters are applied cheapest-first: region, then country, age and join
     date (all read straight off the one profile fetch), then last activity
-    (one events call), and only then the expensive email gathering. Gender is
-    last of all -- it needs a Claude call, so it runs only for someone who
-    already cleared every other bar and has an email.
+    (one events call), and only then the expensive email gathering. The mailbox
+    provider is judged on the address that gathering produced. Gender is last of
+    all -- it needs a Claude call, so it runs only for someone who already
+    cleared every other bar and has an email.
     """
     prof = gh_get(f"{API}/users/{login}")
     if not prof or prof.get("type") != "User":
@@ -593,6 +596,14 @@ def scrape_user(login: str, *, regions, site_delay: float,
     # someone who published only an address.
     if not emails and not phones:
         return None, "no-contact"
+
+    # Mailbox bucket of the address we would actually write to -- the same
+    # judgement the app's Email filter makes, made here so a targeted run only
+    # keeps, say, Gmail people. Someone kept for a number alone has no address
+    # to bucket, so a provider filter rules them out: the filter is a statement
+    # about where the mail would land.
+    if providers and email_provider(emails[0] if emails else "") not in providers:
+        return None, "off-provider"
 
     # Gender last: it costs a Claude call, so only ask for someone who already
     # cleared region/country/age and is contactable. Stored on the record so the
@@ -743,6 +754,10 @@ def main() -> int:
     ap.add_argument("--gender", default=None,
                     help="keep only this gender ('male' or 'female'), inferred "
                          "by Claude for near-keepers -- needs ANTHROPIC_API_KEY")
+    ap.add_argument("--providers", default=None,
+                    help="keep only users whose best email is in these mailbox "
+                         "buckets (comma-separated: "
+                         + ", ".join(k for k, _ in EMAIL_PROVIDERS) + ")")
     ap.add_argument("--joined-after", default=None, metavar="DATE",
                     help="keep only accounts created on/after this ISO date "
                          "(e.g. 2024-01-01)")
@@ -795,11 +810,20 @@ def main() -> int:
               f"(pick from {', '.join(ALL_REGIONS)})", file=sys.stderr)
         return 2
 
-    # Country / age / gender narrowing filters (all optional, all default off).
+    # Country / age / gender / provider narrowing (all optional, default off).
     countries = {c.strip().lower() for c in (args.countries or "").split(",")
                  if c.strip()} or None
     genders = {g.strip().lower() for g in (args.gender or "").split(",")
                if g.strip() in ("male", "female")} or None
+    provider_keys = {k for k, _ in EMAIL_PROVIDERS}
+    providers = {p.strip().lower() for p in (args.providers or "").split(",")
+                 if p.strip().lower() in provider_keys} or None
+    unknown = {p.strip().lower() for p in (args.providers or "").split(",")
+               if p.strip()} - provider_keys
+    if unknown:
+        print(f"unknown mailbox bucket(s): {', '.join(sorted(unknown))} "
+              f"(pick from {', '.join(sorted(provider_keys))})", file=sys.stderr)
+        return 2
     if genders and not ANTHROPIC_API_KEY:
         print("! --gender needs ANTHROPIC_API_KEY (Claude infers gender); "
               "ignoring the gender filter.", file=sys.stderr)
@@ -840,6 +864,8 @@ def main() -> int:
         narrowing.append(f"active>={args.active_after}")
     if args.active_before:
         narrowing.append(f"active<{args.active_before}")
+    if providers:
+        narrowing.append(f"email={','.join(sorted(providers))}")
     if genders:
         narrowing.append(f"gender={','.join(sorted(genders))}")
     if narrowing:
@@ -887,7 +913,7 @@ def main() -> int:
                     use_commits=not args.no_commits, use_site=not args.no_site,
                     use_readme=not args.no_readme, countries=countries,
                     age_min=args.age_min, age_max=args.age_max, genders=genders,
-                    **date_bounds,
+                    providers=providers, **date_bounds,
                 )
             except RateLimited as e:
                 done.add(login)
@@ -908,8 +934,9 @@ def main() -> int:
             done.add(login)
             if not rec:
                 # Skip-list only *filter-independent* verdicts. "off-country",
-                # "off-age" and "off-gender" are relative to THIS run's flags --
-                # a later run with different flags would want these people, so
+                # "off-age", "off-provider" and "off-gender" are relative to THIS
+                # run's flags -- a later run with different flags would want
+                # these people, so
                 # persisting them would wrongly hide them. Those just skip for
                 # the run (they're in `done` above). "not-a-user"/"no-contact"/
                 # "off-region" are stable enough to remember across runs.

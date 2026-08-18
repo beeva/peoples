@@ -10,6 +10,15 @@ export interface CountryFacet {
   count: number;
 }
 
+/** One mailbox bucket with how many contacts' main email falls in it. The
+ *  server owns the keys and labels -- see EMAIL_PROVIDERS in
+ *  scrapers/common/emails.py -- so the two sides can't drift. */
+export interface ProviderFacet {
+  key: string;
+  label: string;
+  count: number;
+}
+
 export interface Facets {
   countries: CountryFacet[];
   genders: { male: number; female: number; unknown: number };
@@ -19,7 +28,21 @@ export interface Facets {
   runs: { run: number; count: number }[];
   /** How many contacts are reachable by phone, and by WhatsApp specifically. */
   contactable: { phone: number; whatsapp: number };
+  /** Mailbox buckets, in display order, every one listed even at zero. */
+  providers: ProviderFacet[];
 }
+
+/** The mailbox buckets a contact's main email can fall in. Mirrors
+ *  EMAIL_PROVIDERS in scrapers/common/emails.py -- kept here only so a bucket
+ *  typed into the URL by hand can be thrown out before it reaches the API;
+ *  every label shown comes from the server's facet list, not from this. */
+export const PROVIDER_KEYS = [
+  "gmail",
+  "outlook",
+  "hotmail",
+  "personal",
+  "company",
+] as const;
 
 /** Compare account age (years on GitHub) against a single value. */
 export type AgeOp = "" | "over" | "equal" | "less";
@@ -33,6 +56,7 @@ export interface FacetFilter {
   genders: string[]; // male | female | unknown
   runs: string[]; // scrape run numbers ("steps"), multi
   contactable: string[]; // phone | whatsapp -- reachable by number
+  providers: string[]; // mailbox bucket of the main email, multi
   ageOp: AgeOp; // over N / exactly N / less than N years old
   ageValue: string; // whole years; "" when ageOp is ""
   joinedOp: DateOp; // joined after/before a date
@@ -46,6 +70,7 @@ export const EMPTY_FILTER: FacetFilter = {
   genders: [],
   runs: [],
   contactable: [],
+  providers: [],
   ageOp: "",
   ageValue: "",
   joinedOp: "",
@@ -69,6 +94,7 @@ export function hasActiveFilter(f: FacetFilter): boolean {
     f.countries.length > 0 ||
     f.genders.length > 0 ||
     f.contactable.length > 0 ||
+    f.providers.length > 0 ||
     f.runs.length > 0 ||
     ageActive(f) ||
     dateActive(f.joinedOp, f.joinedDate) ||
@@ -99,6 +125,7 @@ export function parseFilter(sp: {
   gender?: string | string[];
   runs?: string | string[];
   contactable?: string | string[];
+  provider?: string | string[];
   age_op?: string | string[];
   age?: string | string[];
   joined_op?: string | string[];
@@ -137,6 +164,9 @@ export function parseFilter(sp: {
     runs: csvList(sp.runs).filter((r) => /^\d+$/.test(r)),
     contactable: csvList(sp.contactable).filter((c) =>
       ["phone", "whatsapp"].includes(c),
+    ),
+    providers: csvList(sp.provider).filter((p) =>
+      (PROVIDER_KEYS as readonly string[]).includes(p),
     ),
     ageOp: ageValue ? ageOp : "",
     ageValue: ageOp ? ageValue : "",

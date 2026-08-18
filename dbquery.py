@@ -171,6 +171,26 @@ def _add_contactable(w: Where, wanted: set) -> None:
         w.add("c.phone_count > 0")
 
 
+def _add_provider(w: Where, wanted: set[str]) -> None:
+    """Narrow to contacts whose MAIN email sits in one of these mailbox buckets.
+
+    Any-of, like the other pills. The bucket was worked out at ingest and lives
+    on the row, so this is a plain IN rather than a domain match per row -- see
+    ``common.email_provider`` for what puts an address in which bucket.
+    """
+    if not wanted:
+        return
+    marks = ", ".join(["%s"] * len(wanted))
+    w.add(f"c.provider IN ({marks})", *sorted(wanted))
+
+
+def parse_providers(value: str) -> set[str]:
+    """The bucket keys in a comma list, dropping anything not a real bucket."""
+    valid = {k for k, _ in EMAIL_PROVIDERS}
+    return {p.strip().lower() for p in (value or "").split(",")
+            if p.strip().lower() in valid}
+
+
 def _add_runs(w: Where, wanted: set[int]) -> None:
     if not wanted:
         return
@@ -393,8 +413,17 @@ def _facets(w: Where, now_ts: float) -> dict:
         f"WHERE {w.sql} AND c.run > 0 GROUP BY c.run ORDER BY c.run ASC",
         w.params)]
 
+    # Mailbox bucket of each contact's main email. Fixed order with every
+    # bucket listed even at zero, the same contract the export dialog gets --
+    # the pills shouldn't reshuffle or vanish as the set narrows.
+    provider_counts = {r["provider"]: int(r["n"]) for r in db.query(
+        f"SELECT c.provider AS provider, COUNT(*) AS n FROM contacts c "
+        f"WHERE {w.sql} GROUP BY c.provider", w.params)}
+    providers = [{"key": k, "label": label, "count": provider_counts.get(k, 0)}
+                 for k, label in EMAIL_PROVIDERS]
+
     return {"countries": countries, "genders": genders, "ages": ages,
-            "runs": runs, "contactable": contactable}
+            "runs": runs, "contactable": contactable, "providers": providers}
 
 
 # ---- the list -------------------------------------------------------------
@@ -403,7 +432,7 @@ def query_records(source: str, q: str, sort: str, page: int, per_page: int,
                   age_min: str = "", age_max: str = "", runs: str = "",
                   joined_op: str = "", joined_date: str = "",
                   active_op: str = "", active_date: str = "",
-                  contactable: str = "", on_page=None):
+                  contactable: str = "", provider: str = "", on_page=None):
     if source != "all" and source not in rec_mod.SOURCE_BY_KEY:
         source = "all"  # unknown source -> behave like "all"
 
@@ -463,6 +492,9 @@ def query_records(source: str, q: str, sort: str, page: int, per_page: int,
                           if c.strip().lower() in ("phone", "whatsapp")}
     _add_contactable(filtered, wanted_contactable)
 
+    wanted_providers = parse_providers(provider)
+    _add_provider(filtered, wanted_providers)
+
     _add_date(filtered, "c.created_ts", joined_op, joined_date)
     _add_date(filtered, "c.activity_ts", active_op, active_date)
 
@@ -506,6 +538,7 @@ def query_records(source: str, q: str, sort: str, page: int, per_page: int,
         "gender": ",".join(sorted(wanted_genders)),
         "runs": ",".join(str(r) for r in sorted(wanted_runs)),
         "contactable": ",".join(sorted(wanted_contactable)),
+        "provider": ",".join(sorted(wanted_providers)),
         "age_min": age_min,
         "age_max": age_max,
         "facets": facets,
@@ -604,12 +637,7 @@ def export_records(source: str, gender: str = "", active_op: str = "",
                     if g.strip() in ("male", "female", "unknown")})
 
     # Mailbox provider of the main email -- the one address that gets exported.
-    valid = {k for k, _ in EMAIL_PROVIDERS}
-    wanted_providers = {p.strip().lower() for p in (provider or "").split(",")
-                        if p.strip().lower() in valid}
-    if wanted_providers:
-        marks = ", ".join(["%s"] * len(wanted_providers))
-        w.add(f"c.provider IN ({marks})", *sorted(wanted_providers))
+    _add_provider(w, parse_providers(provider))
 
     _add_country(w, {c.strip().lower() for c in (country or "").split(",")
                      if c.strip()})

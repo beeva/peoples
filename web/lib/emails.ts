@@ -9,7 +9,14 @@ import {
 // Re-export the filter model so server-side callers can keep importing it from
 // "@/lib/emails"; the client imports it straight from "@/lib/filters" (which has
 // no server-only guard).
-export type { AgeOp, CountryFacet, DateOp, FacetFilter, Facets } from "./filters";
+export type {
+  AgeOp,
+  CountryFacet,
+  DateOp,
+  FacetFilter,
+  Facets,
+  ProviderFacet,
+} from "./filters";
 export {
   ageActive,
   ageToRange,
@@ -17,6 +24,7 @@ export {
   EMPTY_FILTER,
   hasActiveFilter,
   parseFilter,
+  PROVIDER_KEYS,
 } from "./filters";
 
 export type SourceKey =
@@ -239,6 +247,7 @@ interface RawResponse {
     ages?: Record<string, number>;
     runs?: { run?: number; count?: number }[];
     contactable?: { phone?: number; whatsapp?: number };
+    providers?: { key?: string; label?: string; count?: number }[];
   };
   stats?: RawStats;
   sources?: RawSource[];
@@ -368,6 +377,8 @@ export async function fetchEmails(
   if (filter.genders.length) params.set("gender", filter.genders.join(","));
   if (filter.contactable.length)
     params.set("contactable", filter.contactable.join(","));
+  if (filter.providers.length)
+    params.set("provider", filter.providers.join(","));
   if (filter.runs.length) params.set("runs", filter.runs.join(","));
   const { min, max } = ageToRange(filter);
   if (min) params.set("age_min", min);
@@ -440,6 +451,7 @@ const EMPTY_FACETS: Facets = {
   ages: {},
   runs: [],
   contactable: { phone: 0, whatsapp: 0 },
+  providers: [],
 };
 
 function mapFacets(f: RawResponse["facets"]): Facets {
@@ -464,6 +476,13 @@ function mapFacets(f: RawResponse["facets"]): Facets {
     runs: (f?.runs ?? [])
       .map((r) => ({ run: r.run ?? 0, count: r.count ?? 0 }))
       .filter((r) => r.run > 0),
+    providers: (f?.providers ?? [])
+      .map((p) => ({
+        key: (p.key ?? "").trim(),
+        label: (p.label ?? "").trim() || (p.key ?? "").trim(),
+        count: p.count ?? 0,
+      }))
+      .filter((p) => p.key),
   };
 }
 
